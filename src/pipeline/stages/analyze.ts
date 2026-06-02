@@ -58,15 +58,16 @@ export class AnalyzeStage implements PipelineStage {
       return { success: true, itemsProcessed: 0, errors: [], durationMs: 0 };
     }
 
-    const monthStart = new Date();
-    monthStart.setDate(1);
-    monthStart.setHours(0, 0, 0, 0);
-    const monthStartISO = monthStart.toISOString();
+    const now = new Date();
+    // Use 'YYYY-MM-01 00:00:00' SQLite datetime format. toISOString() produces
+    // 'YYYY-MM-DDT...' (with 'T'), which compares incorrectly against SQLite's
+    // datetime('now') default format 'YYYY-MM-DD HH:MM:SS' (space, not 'T').
+    const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01 00:00:00`;
 
     const selectMonthlySpend = db.prepare<MonthlySpend, [string]>(`
       SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total
       FROM analyses
-      WHERE analyzed_at >= ?
+      WHERE datetime(analyzed_at) >= datetime(?)
     `);
 
     const insertAnalysis = db.prepare(`
@@ -98,7 +99,7 @@ export class AnalyzeStage implements PipelineStage {
 
     for (const item of pendingItems) {
       // Budget hard cap check before each item
-      const spend = selectMonthlySpend.get(monthStartISO)!;
+      const spend = selectMonthlySpend.get(monthStart)!;
       const currentSpend = spend.total ?? 0;
       const budgetCap = settings.budget.monthlyCap;
       const cutoff = settings.budget.cutoffThreshold;

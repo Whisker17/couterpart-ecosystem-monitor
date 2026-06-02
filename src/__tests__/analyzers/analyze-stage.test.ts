@@ -292,6 +292,49 @@ describe("AnalyzeStage.execute", () => {
     expect(result.itemsProcessed).toBe(0);
   });
 
+  test("budget cap enforced when prior analysis stored with SQLite datetime format (YYYY-MM-DD HH:MM:SS)", async () => {
+    // Regression: toISOString() produces 'YYYY-MM-DDT...' but SQLite stores
+    // datetime('now') as 'YYYY-MM-DD HH:MM:SS'. Space (0x20) < 'T' (0x54)
+    // lexically, so a row from the 1st of the month was excluded from the spend
+    // sum. Using datetime() on both sides of the comparison fixes this.
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+
+    db.exec(`INSERT INTO competitors (name, org) VALUES ('Corp X', 'corp-x')`);
+    const cid = db.query<{ id: number }, []>("SELECT last_insert_rowid() as id").get()!.id;
+    db.exec(`
+      INSERT INTO content_items (competitor_id, source, source_url, content, analysis_status)
+      VALUES (${cid}, 'blog', 'https://corp-x.com/post-1', 'content1', 'pending')
+    `);
+
+    // Seed a prior analysis row using SQLite's native datetime format ('YYYY-MM-DD HH:MM:SS')
+    // on the 1st of the current month, mid-day. The buggy code would miss this row.
+    const now = new Date();
+    const firstOfMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01 12:00:00`;
+    const monthlyCap = 40; // matches settings.json
+    db.exec(`
+      INSERT INTO analyses
+        (content_item_id, summary, significance, input_tokens, output_tokens,
+         model_id, estimated_cost_usd, analyzed_at)
+      VALUES
+        (1, 'prior analysis', 'routine', 1000, 500,
+         'claude-sonnet-4-6', ${monthlyCap}, '${firstOfMonth}')
+    `);
+
+    let callCount = 0;
+    const countingMock: GenerateObjectFn = async (_opts) => {
+      callCount++;
+      return makeGenerateObjectMock()(_opts);
+    };
+
+    const stage = new AnalyzeStage(countingMock);
+    const result = await stage.execute(CTX);
+
+    // The prior analysis fills the budget; the pending item must not be processed
+    expect(callCount).toBe(0);
+    expect(result.itemsProcessed).toBe(0);
+  });
+
   test("processes multiple items in a single run", async () => {
     const { getDb } = await import("../../storage/db.js");
     const db = getDb();
