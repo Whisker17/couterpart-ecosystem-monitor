@@ -60,11 +60,13 @@ async function seedCompletedItem(opts: {
   name: string;
   significance?: "routine" | "notable" | "directional_shift";
   sourceUrl?: string;
+  summary?: string;
 }) {
   const { getDb } = await import("../../storage/db.js");
   const db = getDb();
   const sig = opts.significance ?? "routine";
   const url = opts.sourceUrl ?? `https://${opts.org}.com/post-1`;
+  const summary = opts.summary ?? "Summary text";
 
   db.exec(`
     INSERT OR IGNORE INTO competitors (name, org)
@@ -86,7 +88,7 @@ async function seedCompletedItem(opts: {
   db.exec(`
     INSERT OR IGNORE INTO analyses
       (content_item_id, summary, significance, urgency)
-    VALUES (${item.id}, 'Summary text', '${sig}', 'normal')
+    VALUES (${item.id}, '${summary.replace(/'/g, "''")}', '${sig}', 'normal')
   `);
 
   return { competitorId: comp.id, itemId: item.id };
@@ -517,6 +519,68 @@ describe("ReportStage.execute weekly mode", () => {
       `SELECT id FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
     ).all();
     expect(rows.length).toBe(1);
+  });
+
+  test(">20KB weekly card trims routine panels, keeps notable panels", async () => {
+    // Seed two notable items plus many routine items with long summaries to push
+    // the single card over 20KB, triggering the trim path.
+    const longSummary = "競品动态分析。".repeat(60); // ~420 chars per item
+
+    await seedCompletedItem({
+      org: "corp-a", name: "Corp A", significance: "notable",
+      sourceUrl: "https://corp-a.com/notable-1", summary: longSummary,
+    });
+    await seedCompletedItem({
+      org: "corp-a", name: "Corp A", significance: "notable",
+      sourceUrl: "https://corp-a.com/notable-2", summary: longSummary,
+    });
+
+    // 40 routine items with long summaries easily exceed 20KB
+    for (let i = 0; i < 40; i++) {
+      await seedCompletedItem({
+        org: "corp-a", name: "Corp A", significance: "routine",
+        sourceUrl: `https://corp-a.com/routine-${i}`, summary: longSummary,
+      });
+    }
+
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{
+        elements: Array<{ tag: string; header?: { title: { content: string } } }>;
+      }>;
+    };
+
+    // Trimming should reduce to a single card
+    expect(report.cards.length).toBe(1);
+
+    const elements = report.cards[0]!.elements;
+    const panels = elements.filter((e) => e.tag === "collapsible_panel") as Array<{
+      tag: string;
+      elements: Array<{ content: string }>;
+    }>;
+
+    // Only the 2 notable panels should remain; all 40 routine panels trimmed away
+    expect(panels.length).toBe(2);
+
+    // Panel content contains the source URL — confirm notable URLs present, routine absent
+    const allPanelContent = panels.flatMap((p) => p.elements.map((el) => el.content)).join("\n");
+    expect(allPanelContent).toContain("notable-1");
+    expect(allPanelContent).toContain("notable-2");
+    expect(allPanelContent).not.toContain("routine-");
+
+    // Omission notice present
+    const allText = elements
+      .filter((e) => e.tag === "markdown")
+      .map((e) => (e as { content?: string }).content ?? "")
+      .join("\n");
+    expect(allText).toContain("已省略");
   });
 
   test("daily mode unaffected by weekly implementation", async () => {

@@ -325,9 +325,7 @@ function buildWeeklyLarkCards(
   const weekStart = computeWeekStart(reportDate);
   const baseTitle = `竞品动态周报 - ${weekStart} ~ ${reportDate}`;
 
-  const directionItems = items.filter((i) => i.significance === "directional_shift");
-  const activitySummaries = buildActivitySummaries(items);
-
+  // Grouped map used only for the per-competitor split path (>30KB).
   const grouped = new Map<string, WeeklyRow[]>();
   for (const item of items) {
     const key = item.competitor_org;
@@ -335,13 +333,28 @@ function buildWeeklyLarkCards(
     grouped.get(key)!.push(item);
   }
 
+  // All sections are derived from cardItems so that trim and split paths
+  // produce correctly scoped content rather than always rendering all items.
+  // themes comes from the outer scope (extracted from the full item list) and
+  // appears in every card; cardItems.length < 3 guards the placeholder because
+  // cross-competitor themes are only meaningful when the card has enough data.
   function buildCard(cardItems: WeeklyRow[], headerTitle: string): LarkCard {
+    const cardDirectionItems = cardItems.filter((i) => i.significance === "directional_shift");
+    const cardActivitySummaries = buildActivitySummaries(cardItems);
+
+    const cardGrouped = new Map<string, WeeklyRow[]>();
+    for (const item of cardItems) {
+      const key = item.competitor_org;
+      if (!cardGrouped.has(key)) cardGrouped.set(key, []);
+      cardGrouped.get(key)!.push(item);
+    }
+
     const elements: LarkElement[] = [];
 
     // Direction Changes section
-    elements.push({ tag: "markdown", content: `## 方向性变化 (${directionItems.length})` });
-    if (directionItems.length > 0) {
-      for (const item of directionItems) {
+    elements.push({ tag: "markdown", content: `## 方向性变化 (${cardDirectionItems.length})` });
+    if (cardDirectionItems.length > 0) {
+      for (const item of cardDirectionItems) {
         elements.push({ tag: "markdown", content: buildItemSummaryLine(item) });
       }
     } else {
@@ -351,7 +364,7 @@ function buildWeeklyLarkCards(
 
     // Activity Summary section
     elements.push({ tag: "markdown", content: "## 活动概览" });
-    const summaryLines = activitySummaries.map(
+    const summaryLines = cardActivitySummaries.map(
       (s) =>
         `**${s.competitor_name}**：共 ${s.total} 条（方向性变化 ${s.directional_shift} / 值得关注 ${s.notable} / 常规 ${s.routine}）`
     );
@@ -360,7 +373,7 @@ function buildWeeklyLarkCards(
 
     // Cross-Competitor Themes section
     elements.push({ tag: "markdown", content: "## 跨竞品主题" });
-    if (items.length < 3) {
+    if (cardItems.length < 3) {
       elements.push({ tag: "markdown", content: "数据不足，跳过主题提取" });
     } else if (themes.length === 0) {
       elements.push({ tag: "markdown", content: "_主题提取不可用。_" });
@@ -376,7 +389,7 @@ function buildWeeklyLarkCards(
     elements.push({ tag: "hr" });
 
     // Per-competitor collapsible panels
-    for (const [, compItems] of grouped) {
+    for (const [, compItems] of cardGrouped) {
       const sorted = [...compItems].sort(
         (a, b) => (SIGNIFICANCE_ORDER[a.significance] ?? 99) - (SIGNIFICANCE_ORDER[b.significance] ?? 99)
       );
