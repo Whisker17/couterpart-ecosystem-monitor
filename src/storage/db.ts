@@ -9,6 +9,40 @@ const CURRENT_VERSION = 1;
 
 let instance: Database | null = null;
 
+// WAL mode change requires an exclusive lock; bun:sqlite's busy_timeout does
+// not always suppress SQLITE_BUSY for PRAGMA journal_mode=WAL when concurrent
+// processes race on a fresh database. We handle it two ways:
+//   (a) Skip the call entirely if the DB is already in WAL mode (sticky).
+//   (b) Retry with backoff when SQLITE_BUSY is thrown until the window closes.
+function setJournalModeWAL(db: Database): void {
+  const { journal_mode } = db
+    .query<{ journal_mode: string }, []>("PRAGMA journal_mode")
+    .get()!;
+  if (journal_mode === "wal") return; // already set — no exclusive lock needed
+
+  const STEP_MS = 200;
+  const MAX_ATTEMPTS = Math.ceil(5000 / STEP_MS);
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      db.exec("PRAGMA journal_mode=WAL");
+      return;
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes("SQLITE_BUSY") || msg.includes("database is locked")) {
+        if (attempt === MAX_ATTEMPTS) throw e;
+        Bun.sleepSync(STEP_MS);
+        // Re-check: another process may have already switched to WAL.
+        const { journal_mode: current } = db
+          .query<{ journal_mode: string }, []>("PRAGMA journal_mode")
+          .get()!;
+        if (current === "wal") return;
+      } else {
+        throw e;
+      }
+    }
+  }
+}
+
 function initDb(): Database {
   const dbPath = process.env.DB_PATH ?? "data/monitor.db";
   const dir = dirname(dbPath);
@@ -21,7 +55,7 @@ function initDb(): Database {
   // busy_timeout must be first: sets the retry window before any
   // potentially lock-taking pragma (journal_mode=WAL needs an exclusive lock).
   db.exec("PRAGMA busy_timeout=5000");
-  db.exec("PRAGMA journal_mode=WAL");
+  setJournalModeWAL(db);
   db.exec("PRAGMA temp_store=MEMORY");
   db.exec("PRAGMA cache_size=-64000");
   db.exec("PRAGMA mmap_size=268435456");
