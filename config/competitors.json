@@ -1,1 +1,52 @@
-{}
+[
+  {
+    "name": "Optimism",
+    "org": "optimism",
+    "blogRssUrl": "https://optimism.mirror.xyz/feed",
+    "xHandle": "optimismFND",
+    "xEnabled": false,
+    "websiteUrl": "https://www.optimism.io",
+    "tags": ["layer2", "op-stack"],
+    "rssQuality": "full"
+  },
+  {
+    "name": "Arbitrum",
+    "org": "arbitrum",
+    "blogRssUrl": "https://arbitrumfoundation.medium.com/feed",
+    "xHandle": "arbitrum",
+    "xEnabled": false,
+    "websiteUrl": "https://arbitrum.io",
+    "tags": ["layer2", "rollup"],
+    "rssQuality": "truncated"
+  },
+  {
+    "name": "Polygon",
+    "org": "polygon",
+    "blogRssUrl": "https://polygon.technology/blog/feed",
+    "xHandle": "0xPolygon",
+    "xEnabled": false,
+    "websiteUrl": "https://polygon.technology",
+    "tags": ["layer2", "zkevm"],
+    "rssQuality": "full"
+  },
+  {
+    "name": "zkSync",
+    "org": "zksync",
+    "blogRssUrl": "https://zksync.mirror.xyz/feed",
+    "xHandle": "zksync",
+    "xEnabled": false,
+    "websiteUrl": "https://zksync.io",
+    "tags": ["layer2", "zk-rollup"],
+    "rssQuality": "full"
+  },
+  {
+    "name": "StarkWare",
+    "org": "starkware",
+    "blogRssUrl": "https://starkware.co/blog/feed",
+    "xHandle": "StarkWareLtd",
+    "xEnabled": false,
+    "websiteUrl": "https://starkware.co",
+    "tags": ["layer2", "stark"],
+    "rssQuality": "truncated"
+  }
+]
