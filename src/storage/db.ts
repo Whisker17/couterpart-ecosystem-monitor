@@ -1,0 +1,2 @@
+// Database initialization + pragmas
+export {};

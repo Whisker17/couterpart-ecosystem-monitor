@@ -1,0 +1,22 @@
+{
+  "name": "couterpart-ecosystem-monitor",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "start": "bun run src/index.ts",
+    "e2e": "bun run src/e2e-run.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "latest",
+    "@extractus/article-extractor": "latest",
+    "ai": "latest",
+    "croner": "latest",
+    "rss-parser": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
