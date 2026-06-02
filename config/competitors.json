@@ -7,7 +7,7 @@
     "xEnabled": false,
     "websiteUrl": "https://ethereum.org",
     "tags": ["layer1", "research"],
-    "rssQuality": "full"
+    "rssQuality": "truncated"
   },
   {
     "name": "Arbitrum",
@@ -27,7 +27,7 @@
     "xEnabled": false,
     "websiteUrl": "https://chain.link",
     "tags": ["oracle", "infrastructure"],
-    "rssQuality": "full"
+    "rssQuality": "truncated"
   },
   {
     "name": "Vitalik Buterin",
@@ -37,7 +37,7 @@
     "xEnabled": false,
     "websiteUrl": "https://vitalik.eth.limo",
     "tags": ["research", "ethereum"],
-    "rssQuality": "full"
+    "rssQuality": "title_only"
   },
   {
     "name": "Matter Labs",
@@ -47,6 +47,6 @@
     "xEnabled": false,
     "websiteUrl": "https://matter-labs.io",
     "tags": ["layer2", "zk-rollup"],
-    "rssQuality": "truncated"
+    "rssQuality": "full"
   }
 ]

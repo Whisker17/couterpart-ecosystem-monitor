@@ -8,12 +8,12 @@ import { getDb } from "./storage/db.js";
 import type { PipelineStage } from "./pipeline/runner.js";
 import type { Scheduler } from "./scheduler/cron.js";
 
-// Initialize the database on startup so data/monitor.db is created immediately.
-getDb();
-
 export function startup(
   createSchedulerFn: (stages: PipelineStage[]) => Scheduler = createScheduler
 ): void {
+  // Initialize the database before env validation so data/monitor.db is always
+  // created on first startup, even if env vars are missing.
+  getDb();
   validateEnv();
 
   const stages = [collectStage, analyzeStage, dispatchStage, reportStage];

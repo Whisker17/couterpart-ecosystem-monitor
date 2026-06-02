@@ -1,6 +1,7 @@
 import { test, describe, expect, spyOn, beforeEach, afterEach } from "bun:test";
 import { existsSync, unlinkSync } from "fs";
 import { resolve } from "path";
+import { closeDb } from "../storage/db.ts";
 import { startup } from "../index.ts";
 import type { PipelineStage, PipelineContext } from "../pipeline/runner.ts";
 import type { Scheduler } from "../scheduler/cron.ts";
@@ -80,19 +81,29 @@ function makeMockCreateScheduler(onCreated?: () => void) {
 describe("startup", () => {
   let savedBaseUrl: string | undefined;
   let savedApiKey: string | undefined;
+  let savedDbPath: string | undefined;
+  const TEST_DB = resolve(WDIR, "data/test-startup-validation.db");
 
   beforeEach(() => {
     savedBaseUrl = process.env["LLM_BASE_URL"];
     savedApiKey = process.env["LLM_API_KEY"];
+    savedDbPath = process.env["DB_PATH"];
     delete process.env["LLM_BASE_URL"];
     delete process.env["LLM_API_KEY"];
+    process.env["DB_PATH"] = TEST_DB;
   });
 
   afterEach(() => {
+    closeDb();
+    for (const ext of ["", "-wal", "-shm"]) {
+      try { unlinkSync(TEST_DB + ext); } catch { /* ok */ }
+    }
     if (savedBaseUrl !== undefined) process.env["LLM_BASE_URL"] = savedBaseUrl;
     else delete process.env["LLM_BASE_URL"];
     if (savedApiKey !== undefined) process.env["LLM_API_KEY"] = savedApiKey;
     else delete process.env["LLM_API_KEY"];
+    if (savedDbPath !== undefined) process.env["DB_PATH"] = savedDbPath;
+    else delete process.env["DB_PATH"];
   });
 
   test("calls process.exit(1) before creating scheduler when LLM_BASE_URL is missing", () => {
