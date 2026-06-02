@@ -165,4 +165,45 @@ describe("collectStage.execute", () => {
     expect(result.competitorStatuses).toBeDefined();
     expect(result.competitorStatuses!.length).toBe(2);
   });
+
+  test("first sync: collectFn called with undefined since when no last_synced_at", async () => {
+    let capturedSince: Date | undefined = new Date("3000-01-01"); // sentinel
+    const stage = new CollectStage(
+      () => [COMPETITOR_WITH_RSS],
+      async (_comp, since) => { capturedSince = since; return []; }
+    );
+
+    await stage.execute(CTX);
+    expect(capturedSince).toBeUndefined();
+  });
+
+  test("subsequent sync: passes last_synced_at as since to collectFn", async () => {
+    const syncedAt = "2026-05-01T00:00:00.000Z";
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    db.exec(
+      `INSERT INTO competitors (name, org, last_synced_at) VALUES ('Test Corp', 'test-corp', '${syncedAt}')`
+    );
+
+    let capturedSince: Date | undefined;
+    const stage = new CollectStage(
+      () => [COMPETITOR_WITH_RSS],
+      async (_comp, since) => { capturedSince = since; return []; }
+    );
+
+    await stage.execute(CTX);
+    expect(capturedSince).toBeDefined();
+    expect(capturedSince!.toISOString()).toBe(syncedAt);
+  });
+
+  test("success=false when all RSS-enabled competitors fail", async () => {
+    const stage = new CollectStage(
+      () => [COMPETITOR_WITH_RSS],
+      async () => { throw new Error("network error"); }
+    );
+
+    const result = await stage.execute(CTX);
+    expect(result.success).toBe(false);
+    expect(result.errors.length).toBe(1);
+  });
 });

@@ -6,7 +6,7 @@ import type { CompetitorConfig } from "../../config/competitors.js";
 import type { CollectedItem } from "../../collectors/blog-rss.js";
 
 type GetCompetitorsFn = () => CompetitorConfig[];
-type CollectFromRssFn = (competitor: CompetitorConfig) => Promise<CollectedItem[]>;
+type CollectFromRssFn = (competitor: CompetitorConfig, since?: Date) => Promise<CollectedItem[]>;
 
 export class CollectStage implements PipelineStage {
   readonly name = "collect";
@@ -22,9 +22,11 @@ export class CollectStage implements PipelineStage {
     const errors: string[] = [];
     const competitorStatuses: CompetitorStatus[] = [];
     let totalItems = 0;
+    let rssEnabledCount = 0;
+    let rssSuccessCount = 0;
 
-    const findCompetitor = db.prepare<{ id: number }, [string]>(
-      "SELECT id FROM competitors WHERE org = ?"
+    const findCompetitor = db.prepare<{ id: number; last_synced_at: string | null }, [string]>(
+      "SELECT id, last_synced_at FROM competitors WHERE org = ?"
     );
 
     const insertCompetitor = db.prepare(
@@ -46,9 +48,11 @@ export class CollectStage implements PipelineStage {
       try {
         const existing = findCompetitor.get(competitor.org);
         let competitorId: number;
+        let lastSyncedAt: string | null = null;
 
         if (existing) {
           competitorId = existing.id;
+          lastSyncedAt = existing.last_synced_at;
         } else {
           insertCompetitor.run(
             competitor.name,
@@ -66,7 +70,9 @@ export class CollectStage implements PipelineStage {
         let itemsCollected = 0;
 
         if (competitor.blogRssUrl) {
-          const items = await this.collectFn(competitor);
+          rssEnabledCount++;
+          const since = lastSyncedAt ? new Date(lastSyncedAt) : undefined;
+          const items = await this.collectFn(competitor, since);
           for (const item of items) {
             insertItem.run(
               competitorId,
@@ -79,6 +85,7 @@ export class CollectStage implements PipelineStage {
             itemsCollected++;
           }
           totalItems += itemsCollected;
+          rssSuccessCount++;
         }
 
         updateSynced.run(new Date().toISOString(), competitorId);
@@ -102,8 +109,11 @@ export class CollectStage implements PipelineStage {
       }
     }
 
+    // success = true if no RSS feeds exist OR at least one RSS feed succeeded
+    const success = rssEnabledCount === 0 || rssSuccessCount > 0;
+
     return {
-      success: true,
+      success,
       itemsProcessed: totalItems,
       errors,
       durationMs: 0,
