@@ -183,6 +183,7 @@ CREATE TABLE IF NOT EXISTS content_items (
     input_quality TEXT,          -- 'full' | 'truncated' | 'metadata_only'
     retry_count INTEGER DEFAULT 0,  -- analysis retry attempts (terminal failed at 3)
     last_error TEXT,             -- most recent analysis error message
+    reported_at TEXT,            -- set when item is included in a daily report (NULL = unreported)
     UNIQUE(source_url)           -- dedup by normalized URL (eng review T4)
 );
 
@@ -228,6 +229,7 @@ CREATE TABLE IF NOT EXISTS reports (
     item_count INTEGER,
     notable_count INTEGER,
     is_partial INTEGER DEFAULT 0,
+    content_hash TEXT,           -- SHA-256 of report JSON, used to detect content changes on upsert
     sent_at TEXT,                -- set when all deliveries succeed (NULL = unsent)
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE(report_date, report_type)
@@ -507,6 +509,9 @@ interface StageResult {
 
 interface PipelineContext {
   mode: "daily" | "weekly";
+  reportDate: string;           // YYYY-MM-DD, default today in timezone
+  timezone: string;             // default "Asia/Shanghai"
+  startedAt: Date;              // pipeline start time (wall clock)
   stageResults: Map<string, StageResult>;
 }
 
@@ -517,8 +522,10 @@ interface PipelineStage {
 
 async function runPipeline(
   stages: PipelineStage[],
-  mode: "daily" | "weekly"
+  opts: { mode: "daily" | "weekly"; reportDate?: string; timezone?: string }
 ): Promise<PipelineContext>;
+// reportDate defaults to today in timezone; timezone defaults to "Asia/Shanghai"
+// startedAt is set to Date.now() at pipeline start
 ```
 
 * 顺序执行所有 stage，单个失败不阻断后续
@@ -545,7 +552,7 @@ async function runPipeline(
 **4. 集成到 `src/index.ts`**
 
 * 注册 scheduler
-* `runPipeline([collect, analyze, report, dispatch], mode)` 作为 scheduled task
+* `runPipeline([collect, analyze, report, dispatch], { mode })` 作为 scheduled task
 
 #### 相关文件
 
@@ -823,20 +830,32 @@ LLM 调用：
     break;
   }
   ```
-* 查询待分析 items（含可重试的 failed items）：
+* **状态机（3 states，无歧义）：**
+  * `pending` — 等待分析或可重试（`retry_count < 3`）
+  * `complete` — 分析成功（终态）
+  * `failed` — 达到最大重试次数（终态，不再选取）
+
+* 查询待分析 items：
   ```sql
   SELECT ci.*, c.name, c.org, c.tags, c.website_url
   FROM content_items ci JOIN competitors c ON ci.competitor_id = c.id
   WHERE ci.analysis_status = 'pending'
-     OR (ci.analysis_status = 'failed' AND ci.retry_count < 3)
   ```
-  ⚠️ 必须同时选择 `pending` 和可重试的 `failed` 行
+  ⚠️ 只查 `pending`。失败的 item 保持 `pending` 直到 `retry_count >= 3` 才变 `failed`
 * 对每个 item 顺序处理（**不并发**，控制 API 负载）
 * 成功：`UPDATE content_items SET analysis_status = 'complete' WHERE id = ?`
-* 失败：`UPDATE content_items SET retry_count = retry_count + 1, last_error = ? WHERE id = ?`
-  → `retry_count < 3` 时保持 `analysis_status = 'pending'` 或 `'failed'`，下次 pipeline 自动重试
-  → `retry_count >= 3` 时标记 `analysis_status = 'failed'`（终态，不再重试）
-* 同时写入 `analysis_inputs` 表（prompt_version, input_quality, raw_content_snapshot）— 包括失败调用，以便审计
+* 失败：
+  ```sql
+  UPDATE content_items SET
+    retry_count = retry_count + 1,
+    last_error = ?,
+    analysis_status = CASE WHEN retry_count + 1 >= 3 THEN 'failed' ELSE 'pending' END
+  WHERE id = ?
+  ```
+  → `retry_count < 3`：保持 `pending`，下次 pipeline 自动重试
+  → `retry_count >= 3`：设为 `failed`（终态，查询不再选取）
+* schema 校验失败（`NoObjectGeneratedError`）：同一次运行内立即重试 1 次，仍失败则按上述逻辑递增 `retry_count`
+* 同时写入 `analysis_inputs` 表（prompt_version, input_quality, raw_content_snapshot, error）— 包括失败调用，以便审计
 * 单个 item 失败不阻断其他 item
 
 #### 技术约束
@@ -886,21 +905,25 @@ Issue 9, Issue 11
 
 **1. Daily Report 组装 (`src/pipeline/stages/report.ts`)**
 
-Report stage 接收明确的 `reportDate` 参数（从 PipelineContext 传入，默认今天，E2E runner 可指定）和 `timezone`（默认 `Asia/Shanghai`）。
+Report stage 从 `PipelineContext` 读取 `reportDate`（默认今天）、`timezone`（默认 `Asia/Shanghai`）和 `startedAt`（pipeline 启动时间）。
 
-* 查询窗口：使用"since last successful daily report"策略。查找 `reports` 表中最近一条 `report_type='daily'` 的 `report_date`，获取此后所有已分析完成的 items：
+* **查询窗口：完整快照模式。** 每次生成日报时，选取 `reportDate` 当天所有已分析完成但尚未被任何日报包含的 items：
   ```sql
   SELECT a.*, ci.title, ci.source_url, ci.published_at, c.name as competitor_name
   FROM analyses a
   JOIN content_items ci ON a.content_item_id = ci.id
   JOIN competitors c ON ci.competitor_id = c.id
   WHERE ci.analysis_status = 'complete'
-    AND a.analyzed_at > COALESCE(
-      (SELECT MAX(created_at) FROM reports WHERE report_type = 'daily'),
-      datetime('now', '-7 days')
-    )
+    AND ci.reported_at IS NULL
   ```
-  ⚠️ 不按 `ci.published_at` 过滤（首次 backfill 和延迟分析都需要包含在内），而是用"上次报告之后的新分析"作为窗口
+  分析成功后 `reported_at` 为 NULL；日报生成成功后批量标记：
+  ```sql
+  UPDATE content_items SET reported_at = ? WHERE id IN (...)
+  ```
+  ⚠️ 不依赖 `reports.created_at` 或 `analyzed_at` 时间窗口。`reported_at` 是唯一的业务标记，确保：
+  - 同一天多次运行：第二次只包含新增分析，不重复也不丢失
+  - 延迟分析、backfill：只要分析完成且未被报告，就会被下次日报包含
+  - upsert 覆盖：内容始终是当前完整快照（已 reported + 新增），不存在窗口遗漏
 * 按竞品分组
 * 每个竞品生成：
   * Summary 行：`Competitor A: 2 blog posts, 1 notable — launched new API product`
@@ -947,14 +970,31 @@ Report stage 接收明确的 `reportDate` 参数（从 PipelineContext 传入，
 * 每次生成报告后写入 `data/reports/daily-YYYY-MM-DD.json`
 * 包含 `{ date, card, analyses, completeness }` — 完整报告内容 + 原始分析数据
 
-**5. 幂等写入**
+**5. 幂等写入 + delivery 刷新**
+
+日报写入和 delivery 刷新在同一事务中完成：
 
 ```sql
-INSERT INTO reports (report_date, report_type, content, item_count, notable_count, is_partial)
-VALUES (?, 'daily', ?, ?, ?, ?)
-ON CONFLICT(report_date, report_type)
-DO UPDATE SET content = excluded.content, item_count = excluded.item_count, notable_count = excluded.notable_count, is_partial = excluded.is_partial
+-- 1. Upsert report，内容变化时清除 sent_at 触发重新发送
+INSERT INTO reports (report_date, report_type, content, item_count, notable_count, is_partial, content_hash)
+VALUES (?, 'daily', ?, ?, ?, ?, ?)
+ON CONFLICT(report_date, report_type) DO UPDATE SET
+  content = excluded.content,
+  item_count = excluded.item_count,
+  notable_count = excluded.notable_count,
+  is_partial = excluded.is_partial,
+  content_hash = excluded.content_hash,
+  sent_at = CASE WHEN content_hash != excluded.content_hash THEN NULL ELSE sent_at END
+
+-- 2. 标记新包含的 items
+UPDATE content_items SET reported_at = ? WHERE id IN (...)
+
+-- 3. 如果 content_hash 变化，删除未发送的旧 deliveries 并重建
+DELETE FROM report_deliveries WHERE report_id = ? AND delivery_status != 'sent'
+-- 然后 INSERT 新 deliveries（见 Issue 12/14）
 ```
+
+`content_hash` 为报告 JSON 的 SHA-256 摘要。内容未变时 upsert 不影响 `sent_at`，已发送的 delivery 保持不变；内容变化时 `sent_at` 重置为 NULL，未发送的 deliveries 被删除重建，已发送的保留（避免重复推送）。
 
 #### 相关文件
 
@@ -1071,22 +1111,24 @@ Issue 11
 **1. E2E Runner (`src/e2e-run.ts`)**
 
 ```ts
-// CLI: bun run src/e2e-run.ts --mode daily --no-dispatch
+// CLI: bun run src/e2e-run.ts --mode daily --no-dispatch --date 2026-06-05
 const args = parseArgs({
   options: {
     mode: { type: "string", default: "daily" },       // daily | weekly
     "no-dispatch": { type: "boolean", default: false }, // skip Lark delivery
+    date: { type: "string" },                           // YYYY-MM-DD, default today
   },
 });
 
 async function main() {
   const mode = args.values.mode as "daily" | "weekly";
   const noDispatch = args.values["no-dispatch"];
+  const reportDate = args.values.date;  // undefined = today
 
   const stages = [collect, analyze, report];
   if (!noDispatch) stages.push(dispatch);
 
-  const ctx = await runPipeline(stages, mode);
+  const ctx = await runPipeline(stages, { mode, reportDate });
 
   // Print summary
   for (const [name, result] of ctx.stageResults) {
@@ -1119,6 +1161,7 @@ async function main() {
 
 * [ ] `bun run e2e --mode daily --no-dispatch` 执行完整 pipeline（除 dispatch）
 * [ ] `bun run e2e --mode weekly` 执行 weekly pipeline
+* [ ] `bun run e2e --date 2026-06-05` 指定报告日期
 * [ ] 执行结束后打印每个 stage 的状态摘要
 * [ ] `--no-dispatch` 不触发任何 Lark 请求
 * [ ] 进程正确退出（不 hang）
@@ -1237,10 +1280,10 @@ async function sendCard(webhookUrl: string, card: object): Promise<LarkWebhookRe
 
 完整实现（通过 `report_deliveries` 表追踪发送状态）：
 
-* 查询未发送的报告
-* 为每个报告创建 `report_deliveries` 行（`INSERT OR IGNORE`）
-* 逐条发送 `status != 'sent'` 的 delivery
-* 成功：更新 `delivery_status = 'sent'`, 记录 `message_id`
+* 查询未发送的报告：`SELECT * FROM reports WHERE sent_at IS NULL`
+* Delivery 行由 report stage 在生成/更新报告时创建（见 Issue 8 的"幂等写入 + delivery 刷新"）。内容变化时 report stage 已删除旧的未发送 deliveries 并重建，dispatch stage 不负责创建 delivery 行
+* 逐条发送 `delivery_status != 'sent'` 的 delivery
+* 成功：更新 `delivery_status = 'sent'`, 记录 `message_id`, `sent_at`
 * 失败：更新 `delivery_status = 'failed'`, 记录 `error`
 * 所有 delivery 成功后更新 `reports.sent_at`
 
@@ -1258,10 +1301,11 @@ async function sendCard(webhookUrl: string, card: object): Promise<LarkWebhookRe
 
 * [ ] Lark 群组收到格式正确的消息卡片
 * [ ] 卡片包含 summary + 可折叠详细分析
-* [ ] `report_deliveries` 记录正确创建，`delivery_status` 随发送结果更新
+* [ ] `report_deliveries` 记录正确创建（由 report stage），`delivery_status` 随发送结果更新
 * [ ] 所有 delivery 成功后 `reports.sent_at` 才更新
 * [ ] 发送失败时不 crash，下次 pipeline 重试
-* [ ] 重复运行 dispatch 不重复发送已成功的 delivery
+* [ ] 重复运行 dispatch 不重复发送已成功的 delivery（`delivery_status = 'sent'` 被跳过）
+* [ ] 报告内容更新后（content_hash 变化），旧的未发送 delivery 被重建，已发送的保留
 * [ ] `LARK_WEBHOOK_URL` 缺失时 dispatch stage 优雅跳过
 
 ---
@@ -1325,7 +1369,7 @@ async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions): Promis
 
 * 单个 competitor 失败不阻断其他 competitor
 * 单个 content item 分析失败不阻断同批其他 items
-* Pipeline crash 后重启：`analysis_status = 'pending'` 的 items 和 `analysis_status = 'failed' AND retry_count < 3` 的 items 被重新处理；`delivery_status != 'sent'` 的 cards 被重新发送
+* Pipeline crash 后重启：`analysis_status = 'pending'` 的 items 被重新处理（含 retry_count < 3 的重试中 items）；`delivery_status != 'sent'` 的 cards 被重新发送
 
 #### 相关文件
 
@@ -1340,10 +1384,10 @@ async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions): Promis
 
 * [ ] RSS feed 网络超时后自动重试，不 crash
 * [ ] LLM timeout 时 `retry_count` 递增，`last_error` 记录，其他 items 继续
-* [ ] `retry_count < 3` 的 failed items 下次 pipeline 自动重试
-* [ ] `retry_count >= 3` 的 items 标记 `failed` 终态
+* [ ] `retry_count < 3` 的 items 保持 `pending`，下次 pipeline 自动重试
+* [ ] `retry_count >= 3` 的 items 标记 `failed`（终态，不再被查询选取）
 * [ ] Lark 发送 3 次失败后标记 `failed`，下次 pipeline 重试
-* [ ] Pipeline 中断后重启：不重复分析已完成 items，自动处理 pending 和可重试的 failed items
+* [ ] Pipeline 中断后重启：不重复分析已完成 items，自动处理 pending items（含重试中 items）
 
 ---
 
@@ -1413,7 +1457,7 @@ function formatReport(report: Report): LarkCard | LarkCard[] {
 **Priority:** Urgent
 
 #### Blocked By
-Issue 7（LLM 分析器已有 token 用量 + 成本记录）
+Issue 7（LLM 分析器已有 token 用量 + 成本记录）, Issue 12（Lark 告警推送依赖 Lark dispatcher）
 
 #### Blocks
 无（独立增强）
@@ -1582,7 +1626,7 @@ Issue 11（需要真实数据积累 5+ 天）
 **Eng Review:** T7 (Write test suite per module, 28 codepaths)
 
 #### Blocked By
-Issue 11（所有模块实现完成）
+Issue 13（错误处理 + 重试逻辑）, Issue 14（Lark 降级策略）, Issue 15（预算监控）
 
 #### Blocks
 Issue 19（生产部署前需要测试覆盖）
@@ -1827,8 +1871,9 @@ M1 (Core Pipeline):
 
 M2 (Harden):
   11 ── 12 ── 14
-  11 ── 13 ── 18 ── 19
-  7 ── 15
+  11 ── 13 ─┐
+  7 + 12 ── 15 ─┤
+  14 ──────────┼── 18 ── 19
   11 ── 16
   11 ── 17
 
@@ -1856,10 +1901,10 @@ M3 (Post-MVP, gated by M2 complete):
 | 12 | 11 |
 | 13 | 11 |
 | 14 | 12 |
-| 15 | 7 |
+| 15 | 7, 12 |
 | 16 | 11 |
 | 17 | 11 |
-| 18 | 11 |
+| 18 | 13, 14, 15 |
 | 19 | 13, 18 |
 | 20 | M2 complete |
 | 21 | M2 complete |
