@@ -179,8 +179,10 @@ CREATE TABLE IF NOT EXISTS content_items (
     content_hash TEXT,           -- dedup hash
     published_at TEXT,           -- original publish time
     collected_at TEXT DEFAULT (datetime('now')),
-    analysis_status TEXT DEFAULT 'pending',  -- pending | complete | failed
+    analysis_status TEXT DEFAULT 'pending',  -- pending | complete | failed (failed = terminal after max retries)
     input_quality TEXT,          -- 'full' | 'truncated' | 'metadata_only'
+    retry_count INTEGER DEFAULT 0,  -- analysis retry attempts (terminal failed at 3)
+    last_error TEXT,             -- most recent analysis error message
     UNIQUE(source_url)           -- dedup by normalized URL (eng review T4)
 );
 
@@ -203,14 +205,17 @@ CREATE TABLE IF NOT EXISTS analyses (
     analyzed_at TEXT DEFAULT (datetime('now'))
 );
 
--- Analysis inputs (audit trail)
+-- Analysis inputs (audit trail — written for both successful and failed LLM calls)
 CREATE TABLE IF NOT EXISTS analysis_inputs (
     id INTEGER PRIMARY KEY,
-    analysis_id INTEGER NOT NULL REFERENCES analyses(id),
+    content_item_id INTEGER NOT NULL REFERENCES content_items(id),  -- always set, enables audit of failed calls
+    analysis_id INTEGER REFERENCES analyses(id),  -- NULL when LLM call failed (no analysis row)
+    attempt INTEGER NOT NULL DEFAULT 1,           -- which retry attempt (1-based)
     prompt_version TEXT,
     input_quality TEXT,          -- full | truncated | metadata_only
     competitor_context TEXT,     -- rendered competitor context
     raw_content_snapshot TEXT,   -- content at analysis time
+    error TEXT,                  -- error message if LLM call failed, NULL on success
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -223,6 +228,7 @@ CREATE TABLE IF NOT EXISTS reports (
     item_count INTEGER,
     notable_count INTEGER,
     is_partial INTEGER DEFAULT 0,
+    sent_at TEXT,                -- set when all deliveries succeed (NULL = unsent)
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE(report_date, report_type)
 );
@@ -231,12 +237,14 @@ CREATE TABLE IF NOT EXISTS reports (
 CREATE TABLE IF NOT EXISTS report_deliveries (
     id INTEGER PRIMARY KEY,
     report_id INTEGER NOT NULL REFERENCES reports(id),
+    card_index INTEGER NOT NULL DEFAULT 0,  -- card sequence (0 for single-card, 0..N for split)
     card_content TEXT NOT NULL,
     delivery_status TEXT DEFAULT 'pending',  -- pending | sent | failed
     message_id TEXT,
     sent_at TEXT,
     error TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(report_id, card_index)            -- prevents duplicate deliveries per card
 );
 ```
 
@@ -244,15 +252,17 @@ CREATE TABLE IF NOT EXISTS report_deliveries (
 
 * 使用 `bun:sqlite` 的 `Database` 类
 * 数据库文件路径：`data/monitor.db`（目录不存在时自动创建）
-* 生产级 pragma 配置（**必须全部设置**，eng review 硬性要求）：
+* 生产级 pragma 配置（**必须全部设置**，CLAUDE.md 硬性约束）：
   ```ts
   db.exec("PRAGMA journal_mode=WAL");
+  db.exec("PRAGMA busy_timeout=5000");     // 5s — eng review T5
   db.exec("PRAGMA temp_store=MEMORY");
   db.exec("PRAGMA cache_size=-64000");     // 64MB
   db.exec("PRAGMA mmap_size=268435456");   // 256MB
-  db.exec("PRAGMA busy_timeout=5000");     // 5s — eng review T5
+  db.exec("PRAGMA foreign_keys=ON");       // enforce FK constraints
+  db.exec("PRAGMA synchronous=NORMAL");    // safe with WAL, better perf than FULL
   ```
-* macOS WAL 清理（shutdown hook）：尝试 `db.exec("PRAGMA wal_checkpoint(TRUNCATE)")`
+* macOS WAL 清理（shutdown hook）：使用 `db.fileControl(SQLITE_FCNTL_PERSIST_WAL, 0)` + `db.exec("PRAGMA wal_checkpoint(TRUNCATE)")`。如果 `fileControl` API 不可用，fallback 到仅 checkpoint
 * 导出：`getDb(): Database`（单例）+ `closeDb(): void`
 * 首次运行时自动执行 DDL 建表
 
@@ -275,10 +285,15 @@ CREATE TABLE IF NOT EXISTS report_deliveries (
 * [ ] 六张表结构正确（`sqlite3 data/monitor.db ".schema"` 验证）
 * [ ] `PRAGMA journal_mode` 返回 `wal`
 * [ ] `PRAGMA busy_timeout` 返回 `5000`
+* [ ] `PRAGMA foreign_keys` 返回 `1`
+* [ ] `PRAGMA synchronous` 返回 `1`（NORMAL）
 * [ ] `UNIQUE(source_url)` 约束生效：重复 INSERT 报错或被 IGNORE
 * [ ] `reports` 表的 `UNIQUE(report_date, report_type)` 约束生效
+* [ ] `reports` 表包含 `sent_at TEXT` 列
+* [ ] `report_deliveries` 表包含 `card_index` 列和 `UNIQUE(report_id, card_index)` 约束
 * [ ] `content_items.input_quality` 列存在
-* [ ] 进程 `SIGTERM` 退出时 WAL checkpoint 执行
+* [ ] `content_items` 表包含 `retry_count` 和 `last_error` 列
+* [ ] 进程 `SIGTERM` 退出时 `fileControl(PERSIST_WAL, 0)` + WAL checkpoint 执行
 
 ---
 
@@ -409,9 +424,12 @@ function normalizeUrl(raw: string): string {
   // 2. Strip trailing slash
   url.pathname = url.pathname.replace(/\/+$/, "") || "/";
   // 3. Remove tracking params
-  const trackingPrefixes = ["utm_", "ref", "fbclid", "gclid"];
+  //    - Prefix match for utm_* (utm_source, utm_medium, utm_campaign, etc.)
+  //    - Exact match for ref, source, fbclid, gclid (avoid false positives like "referralCode")
+  const trackingPrefixes = ["utm_"];
+  const trackingExact = new Set(["ref", "source", "fbclid", "gclid"]);
   for (const key of [...url.searchParams.keys()]) {
-    if (trackingPrefixes.some(p => key.startsWith(p))) {
+    if (trackingExact.has(key) || trackingPrefixes.some(p => key.startsWith(p))) {
       url.searchParams.delete(key);
     }
   }
@@ -436,6 +454,8 @@ function normalizeUrl(raw: string): string {
 
 * [ ] `http://example.com/blog/` → `https://example.com/blog`
 * [ ] `https://example.com/blog?utm_source=rss&id=1` → `https://example.com/blog?id=1`
+* [ ] `https://example.com/blog?ref=twitter&source=rss` → `https://example.com/blog`
+* [ ] `https://example.com/blog?referralCode=abc` → URL 保留 `referralCode`（不误删）
 * [ ] `https://example.com/blog#section` → `https://example.com/blog`
 * [ ] 无效 URL 输入不 throw
 * [ ] 相同文章不同 URL 变体 normalize 后完全一致
@@ -803,16 +823,20 @@ LLM 调用：
     break;
   }
   ```
-* 查询待分析 items（含重试）：
+* 查询待分析 items（含可重试的 failed items）：
   ```sql
   SELECT ci.*, c.name, c.org, c.tags, c.website_url
   FROM content_items ci JOIN competitors c ON ci.competitor_id = c.id
   WHERE ci.analysis_status = 'pending'
+     OR (ci.analysis_status = 'failed' AND ci.retry_count < 3)
   ```
+  ⚠️ 必须同时选择 `pending` 和可重试的 `failed` 行
 * 对每个 item 顺序处理（**不并发**，控制 API 负载）
 * 成功：`UPDATE content_items SET analysis_status = 'complete' WHERE id = ?`
-* 失败：`UPDATE content_items SET analysis_status = 'failed' WHERE id = ?`
-* 同时写入 `analysis_inputs` 表（prompt_version, input_quality, raw_content_snapshot）
+* 失败：`UPDATE content_items SET retry_count = retry_count + 1, last_error = ? WHERE id = ?`
+  → `retry_count < 3` 时保持 `analysis_status = 'pending'` 或 `'failed'`，下次 pipeline 自动重试
+  → `retry_count >= 3` 时标记 `analysis_status = 'failed'`（终态，不再重试）
+* 同时写入 `analysis_inputs` 表（prompt_version, input_quality, raw_content_snapshot）— 包括失败调用，以便审计
 * 单个 item 失败不阻断其他 item
 
 #### 技术约束
@@ -836,7 +860,9 @@ LLM 调用：
 * [ ] `input_tokens`, `output_tokens`, `estimated_cost_usd` 正确记录（>0）
 * [ ] `analysis_inputs` 表同步写入 prompt_version, input_quality, raw_content_snapshot
 * [ ] 分析完成后 `content_items.analysis_status` = `'complete'`
-* [ ] LLM 调用失败时标记 `'failed'`
+* [ ] LLM 调用失败时 `retry_count` 递增，`last_error` 记录错误信息
+* [ ] `retry_count < 3` 的失败 item 在下次 pipeline 运行时被自动重试
+* [ ] `retry_count >= 3` 的 item 标记 `analysis_status = 'failed'`（终态），不再被选取
 * [ ] 单个 item 失败不阻断其他 item 的分析
 * [ ] 月度 budget 硬上限：超限时跳过剩余 items，日志输出
 
@@ -860,7 +886,21 @@ Issue 9, Issue 11
 
 **1. Daily Report 组装 (`src/pipeline/stages/report.ts`)**
 
-* 查询：`SELECT a.*, ci.title, ci.source_url, c.name as competitor_name FROM analyses a JOIN content_items ci ON a.content_item_id = ci.id JOIN competitors c ON ci.competitor_id = c.id WHERE a.analyzed_at >= ?`（今天 00:00 UTC）
+Report stage 接收明确的 `reportDate` 参数（从 PipelineContext 传入，默认今天，E2E runner 可指定）和 `timezone`（默认 `Asia/Shanghai`）。
+
+* 查询窗口：使用"since last successful daily report"策略。查找 `reports` 表中最近一条 `report_type='daily'` 的 `report_date`，获取此后所有已分析完成的 items：
+  ```sql
+  SELECT a.*, ci.title, ci.source_url, ci.published_at, c.name as competitor_name
+  FROM analyses a
+  JOIN content_items ci ON a.content_item_id = ci.id
+  JOIN competitors c ON ci.competitor_id = c.id
+  WHERE ci.analysis_status = 'complete'
+    AND a.analyzed_at > COALESCE(
+      (SELECT MAX(created_at) FROM reports WHERE report_type = 'daily'),
+      datetime('now', '-7 days')
+    )
+  ```
+  ⚠️ 不按 `ci.published_at` 过滤（首次 backfill 和延迟分析都需要包含在内），而是用"上次报告之后的新分析"作为窗口
 * 按竞品分组
 * 每个竞品生成：
   * Summary 行：`Competitor A: 2 blog posts, 1 notable — launched new API product`
@@ -927,7 +967,7 @@ DO UPDATE SET content = excluded.content, item_count = excluded.item_count, nota
 * [ ] 生成的 card JSON 结构包含 `config`, `header`, `elements` 三层
 * [ ] Summary section 列出每个竞品的 blog 数 + 重要变化
 * [ ] Technical detail 在 `collapsible_panel` 中
-* [ ] 无分析数据时不生成报告（`itemsProcessed = 0`）
+* [ ] 零新内容时仍生成空日报（写明 "0 new items" + 采集完整性，区分"无动态"和"pipeline 没跑"）
 * [ ] `reports` 表正确写入 `report_type='daily'` 记录
 * [ ] 重复运行 pipeline 不产生重复报告（upsert 覆盖同一行）
 * [ ] 上游 stage 部分失败时，报告卡片中包含 partial report 标记，`is_partial = 1`
@@ -1285,7 +1325,7 @@ async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions): Promis
 
 * 单个 competitor 失败不阻断其他 competitor
 * 单个 content item 分析失败不阻断同批其他 items
-* Pipeline crash 后重启：`analysis_status = 'pending'` 的 items 被重新处理；`delivery_status != 'sent'` 的 cards 被重新发送
+* Pipeline crash 后重启：`analysis_status = 'pending'` 的 items 和 `analysis_status = 'failed' AND retry_count < 3` 的 items 被重新处理；`delivery_status != 'sent'` 的 cards 被重新发送
 
 #### 相关文件
 
@@ -1299,9 +1339,11 @@ async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions): Promis
 #### 验收标准
 
 * [ ] RSS feed 网络超时后自动重试，不 crash
-* [ ] LLM timeout 时 item 标记 `failed`，其他 items 继续
+* [ ] LLM timeout 时 `retry_count` 递增，`last_error` 记录，其他 items 继续
+* [ ] `retry_count < 3` 的 failed items 下次 pipeline 自动重试
+* [ ] `retry_count >= 3` 的 items 标记 `failed` 终态
 * [ ] Lark 发送 3 次失败后标记 `failed`，下次 pipeline 重试
-* [ ] Pipeline 中断后重启：不重复分析已完成 items，自动处理 pending items
+* [ ] Pipeline 中断后重启：不重复分析已完成 items，自动处理 pending 和可重试的 failed items
 
 ---
 
@@ -1378,7 +1420,9 @@ Issue 7（LLM 分析器已有 token 用量 + 成本记录）
 
 #### 目标
 
-实现 LLM token 使用量追踪和预算管控：80% 时降级（跳过 routine items），100% 时熔断（暂停分析 + Lark 告警）。
+实现 LLM token 使用量追踪和预算管控：100% 时熔断（暂停全部分析 + Lark 告警），80% 时 warning 提醒。
+
+> **设计说明：** 不设 80% 降级策略。原因：`significance`（routine/notable/directional_shift）是 LLM 分析结果，pending item 分析前无法判断 significance，因此"80% 时跳过 routine"在当前数据模型下不可执行。如果未来需要降级，应先实现基于标题/内容长度的低成本 pre-classifier。
 
 #### 实现内容
 
@@ -1389,11 +1433,14 @@ interface BudgetStatus {
   estimatedCostUSD: number;
   budgetCapUSD: number;        // settings.budget.monthlyCap (default 40)
   usagePercent: number;
-  action: "normal" | "skip_routine" | "pause";
+  action: "normal" | "warning" | "pause";
 }
 
 function getBudgetStatus(): BudgetStatus {
   // SELECT SUM(estimated_cost_usd) FROM analyses WHERE analyzed_at >= {month_start}
+  // action = "normal" when < 80%
+  // action = "warning" when 80%-100% (log warning, continue analysis)
+  // action = "pause" when >= 100% (stop all analysis)
 }
 ```
 
@@ -1401,9 +1448,9 @@ function getBudgetStatus(): BudgetStatus {
 
 修改 `src/pipeline/stages/analyze.ts`：
 
-* `action = "normal"`: 正常分析
-* `action = "skip_routine"` (80%-100%): 仅分析 notable/unknown 级别 items，routine 跳过
-* `action = "pause"` (100%): 跳过全部分析，发送 Lark 告警
+* `action = "normal"` (<80%): 正常分析
+* `action = "warning"` (80%-100%): 正常分析，但日志输出预算告警，daily report 标记 warning
+* `action = "pause"` (>=100%): 跳过全部分析，pending items 保留待下月；发送 Lark 告警卡片
 
 **3. Budget Dashboard**
 
@@ -1412,7 +1459,7 @@ Daily report card 末尾添加：
 Budget: $15.00 / $40.00 (38%)
 ```
 * 超过 60% 时显示
-* 超过 80% 时标记 warning
+* 超过 80% 时标记 ⚠️ warning
 
 #### 相关文件
 
@@ -1425,9 +1472,9 @@ Budget: $15.00 / $40.00 (38%)
 #### 验收标准
 
 * [ ] `getBudgetStatus()` 返回准确的费用估算
-* [ ] 80% budget 时 routine items 被跳过
-* [ ] 100% budget 时全部分析暂停
-* [ ] Daily report 末尾显示 budget usage
+* [ ] 80% budget 时日志输出 warning，分析继续
+* [ ] 100% budget 时全部分析暂停，Lark 收到告警
+* [ ] Daily report 末尾显示 budget usage（60%+ 时）
 
 ---
 
@@ -1822,7 +1869,7 @@ M3 (Post-MVP, gated by M2 complete):
 
 | Priority | Count | Issues |
 |----------|-------|--------|
-| Urgent | 5 | 1, 2, 5, 6, 7, 11, 13, 15 |
+| Urgent | 8 | 1, 2, 5, 6, 7, 11, 13, 15 |
 | High | 7 | 3, 4, 8, 9, 10, 12, 14 |
 | Medium | 5 | 16, 17, 18, 19, 20 |
 | Low | 2 | 21, 22 |
