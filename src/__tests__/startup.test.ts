@@ -56,6 +56,7 @@ test(
 
 function makeMockScheduler(): Scheduler {
   const self: Scheduler = {
+    cronExpressions: { daily: "mock-daily", weekly: "mock-weekly" },
     start() { return self; },
     stop() {},
     async runNow(mode: "daily" | "weekly"): Promise<PipelineContext> {
@@ -168,5 +169,24 @@ describe("startup", () => {
     expect(exitSpy).not.toHaveBeenCalled();
     expect(schedulerCreated).toBe(true);
     exitSpy.mockRestore();
+  });
+
+  test("wires stages in collect → analyze → report → dispatch order", () => {
+    process.env["LLM_BASE_URL"] = "https://test.example.com/v1";
+    process.env["LLM_API_KEY"] = "test-key";
+    let capturedStageNames: string[] = [];
+    const mockCreate = (stages: PipelineStage[]) => {
+      capturedStageNames = stages.map((s) => s.name);
+      return makeMockScheduler();
+    };
+
+    const exitSpy = spyOn(process, "exit").mockImplementation(
+      ((_code?: number) => undefined) as typeof process.exit
+    );
+
+    startup(mockCreate);
+    exitSpy.mockRestore();
+
+    expect(capturedStageNames).toEqual(["collect", "analyze", "report", "dispatch"]);
   });
 });

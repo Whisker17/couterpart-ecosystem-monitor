@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { createScheduler } from "../../scheduler/cron.js";
+import { getSettings } from "../../config/settings.js";
 import type { PipelineContext } from "../../pipeline/runner.js";
 
 describe("createScheduler", () => {
@@ -42,5 +43,29 @@ describe("createScheduler", () => {
     const result = scheduler.start();
     result.stop();
     expect(result).toBe(scheduler);
+  });
+
+  test("uses settings.schedule.dailyCron by default", () => {
+    const settings = getSettings();
+    const scheduler = createScheduler([]);
+    expect(scheduler.cronExpressions.daily).toBe(settings.schedule.dailyCron);
+  });
+
+  test("uses settings.schedule.weeklyCron by default", () => {
+    const settings = getSettings();
+    const scheduler = createScheduler([]);
+    expect(scheduler.cronExpressions.weekly).toBe(settings.schedule.weeklyCron);
+  });
+
+  test("dailyCron opt overrides the configured schedule", () => {
+    const customExpr = "0 6 * * *";
+    const scheduler = createScheduler([], { dailyCron: customExpr });
+    expect(scheduler.cronExpressions.daily).toBe(customExpr);
+  });
+
+  test("weeklyCron opt overrides the configured schedule", () => {
+    const customExpr = "0 10 * * 5";
+    const scheduler = createScheduler([], { weeklyCron: customExpr });
+    expect(scheduler.cronExpressions.weekly).toBe(customExpr);
   });
 });
