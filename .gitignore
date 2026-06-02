@@ -1,0 +1,22 @@
+# Runtime data
+data/
+
+# Environment
+.env
+
+# Dependencies
+node_modules/
+
+# SQLite
+*.db
+*.db-wal
+*.db-shm
+
+# Code review graph (local tool data)
+.code-review-graph/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# gstack skill symlinks (machine-specific)
+.claude/skills/
