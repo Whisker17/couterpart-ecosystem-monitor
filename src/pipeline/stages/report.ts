@@ -325,60 +325,64 @@ export class ReportStage implements PipelineStage {
       errors.push(`Failed to write report file: ${msg}`);
     }
 
-    // Upsert into reports table
-    const existingReport = db.query<{ id: number; content_hash: string | null }, []>(`
-      SELECT id, content_hash FROM reports
-      WHERE report_date = ? AND report_type = 'daily'
-    `).get(ctx.reportDate);
-
     const notableCount = sorted.filter(
       (r) => r.significance === "notable" || r.significance === "directional_shift"
     ).length;
 
-    let reportId: number;
-    let hashChanged = true;
+    // Prepare statements before entering the transaction
+    const stmtGetReport = db.prepare<{ id: number; content_hash: string | null }, [string]>(`
+      SELECT id, content_hash FROM reports WHERE report_date = ? AND report_type = 'daily'
+    `);
 
-    if (existingReport) {
-      reportId = existingReport.id;
-      hashChanged = existingReport.content_hash !== contentHash;
+    // S3: atomic upsert — hash-change detection and sent_at reset happen inside the DB engine
+    const stmtUpsertReport = db.prepare(`
+      INSERT INTO reports (report_date, report_type, content, item_count, notable_count, is_partial, content_hash)
+      VALUES (?, 'daily', ?, ?, ?, ?, ?)
+      ON CONFLICT(report_date, report_type) DO UPDATE SET
+        content        = excluded.content,
+        item_count     = excluded.item_count,
+        notable_count  = excluded.notable_count,
+        is_partial     = excluded.is_partial,
+        content_hash   = excluded.content_hash,
+        sent_at        = CASE WHEN excluded.content_hash != reports.content_hash THEN NULL ELSE reports.sent_at END
+    `);
 
-      db.prepare(`
-        UPDATE reports SET
-          content = ?,
-          item_count = ?,
-          notable_count = ?,
-          is_partial = ?,
-          content_hash = ?
-          ${hashChanged ? ", sent_at = NULL" : ""}
-        WHERE id = ?
-      `).run(reportJson, sorted.length, notableCount, isPartial ? 1 : 0, contentHash, reportId);
-    } else {
-      db.prepare(`
-        INSERT INTO reports (report_date, report_type, content, item_count, notable_count, is_partial, content_hash)
-        VALUES (?, 'daily', ?, ?, ?, ?, ?)
-      `).run(ctx.reportDate, reportJson, sorted.length, notableCount, isPartial ? 1 : 0, contentHash);
+    const stmtDeleteDeliveries = db.prepare(`DELETE FROM report_deliveries WHERE report_id = ?`);
 
-      reportId = db.query<{ id: number }, []>("SELECT last_insert_rowid() as id").get()!.id;
-    }
+    const stmtInsertDelivery = db.prepare(`
+      INSERT INTO report_deliveries (report_id, card_index, card_content, delivery_status)
+      VALUES (?, ?, ?, 'pending')
+    `);
 
-    // Rebuild deliveries only when content changed
-    if (hashChanged) {
-      db.prepare("DELETE FROM report_deliveries WHERE report_id = ?").run(reportId);
+    // S4: parameterized per-row UPDATE instead of string-interpolated IN (...)
+    const stmtMarkReported = db.prepare(`
+      UPDATE content_items SET reported_at = datetime('now') WHERE id = ?
+    `);
 
-      const insertDelivery = db.prepare(`
-        INSERT INTO report_deliveries (report_id, card_index, card_content, delivery_status)
-        VALUES (?, ?, ?, 'pending')
-      `);
-      for (let i = 0; i < cards.length; i++) {
-        insertDelivery.run(reportId, i, JSON.stringify(cards[i]));
+    // S1: wrap all writes in a single transaction — a crash mid-flight rolls back
+    // to a consistent state; the next run re-runs fully instead of seeing orphaned state.
+    db.transaction(() => {
+      const before = stmtGetReport.get(ctx.reportDate);
+      const prevHash = before?.content_hash ?? null;
+
+      stmtUpsertReport.run(
+        ctx.reportDate, reportJson, sorted.length, notableCount, isPartial ? 1 : 0, contentHash
+      );
+
+      const report = stmtGetReport.get(ctx.reportDate)!;
+      const hashChanged = prevHash !== contentHash;
+
+      if (hashChanged) {
+        stmtDeleteDeliveries.run(report.id);
+        for (let i = 0; i < cards.length; i++) {
+          stmtInsertDelivery.run(report.id, i, JSON.stringify(cards[i]));
+        }
       }
-    }
 
-    // Mark included items as reported
-    if (sorted.length > 0) {
-      const itemIds = sorted.map((r) => r.item_id).join(",");
-      db.exec(`UPDATE content_items SET reported_at = datetime('now') WHERE id IN (${itemIds})`);
-    }
+      for (const row of sorted) {
+        stmtMarkReported.run(row.item_id);
+      }
+    })();
 
     return {
       success: errors.length === 0,
