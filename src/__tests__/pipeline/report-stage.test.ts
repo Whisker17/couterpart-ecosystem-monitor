@@ -2,6 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { existsSync, unlinkSync, mkdirSync, rmSync } from "fs";
 import { ReportStage } from "../../pipeline/stages/report.js";
 import type { PipelineContext, StageResult } from "../../pipeline/runner.js";
+import type { WeeklyTheme } from "../../schema/analysis.js";
 
 const TEST_DB_PATH = "data/test-report-stage.db";
 const REPORT_DATE = "2026-06-02";
@@ -47,6 +48,10 @@ afterEach(async () => {
   // Clean up report files written during tests
   try { rmSync(`data/reports`, { recursive: true, force: true }); } catch { /* ok */ }
   delete process.env.DB_PATH;
+});
+
+const noopGenerateObject = async (_opts: unknown): Promise<{ object: WeeklyTheme }> => ({
+  object: { themes: [{ title: "T1", description: "D1", competitors: ["A"] }, { title: "T2", description: "D2", competitors: ["B"] }] },
 });
 
 // Helper: seed a complete competitor + content_item + analysis ready for report
@@ -302,5 +307,233 @@ describe("ReportStage.execute", () => {
     for (const d of deliveries) {
       expect(d.delivery_status).toBe("pending");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("ReportStage.execute weekly mode", () => {
+  test("stores DB row with report_type='weekly'", async () => {
+    const stage = new ReportStage(noopGenerateObject as never);
+    const result = await stage.execute(makeCTX({ mode: "weekly" }));
+
+    expect(result.success).toBe(true);
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ report_type: string }, []>(
+      `SELECT report_type FROM reports WHERE report_date = '${REPORT_DATE}'`
+    ).get();
+    expect(row?.report_type).toBe("weekly");
+  });
+
+  test("creates file at data/reports/weekly-YYYY-MM-DD.json", async () => {
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    expect(existsSync(`data/reports/weekly-${REPORT_DATE}.json`)).toBe(true);
+  });
+
+  test("includes items with reported_at set (not filtered out)", async () => {
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    db.exec(`INSERT INTO competitors (name, org) VALUES ('Corp A', 'corp-a')`);
+    const comp = db.query<{ id: number }, []>("SELECT id FROM competitors WHERE org = 'corp-a'").get()!;
+    db.exec(`
+      INSERT INTO content_items
+        (competitor_id, source, source_url, title, content, analysis_status, reported_at)
+      VALUES (${comp.id}, 'blog', 'https://corp-a.com/old', 'Old Post', 'Old', 'complete', datetime('now'))
+    `);
+    const item = db.query<{ id: number }, []>("SELECT id FROM content_items WHERE source_url = 'https://corp-a.com/old'").get()!;
+    db.exec(`INSERT INTO analyses (content_item_id, summary, significance, urgency) VALUES (${item.id}, 'Summary', 'routine', 'normal')`);
+
+    const stage = new ReportStage(noopGenerateObject as never);
+    const result = await stage.execute(makeCTX({ mode: "weekly" }));
+
+    expect(result.itemsProcessed).toBe(1);
+  });
+
+  test("does NOT set reported_at on items", async () => {
+    const { itemId } = await seedCompletedItem({ org: "corp-a", name: "Corp A" });
+
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ reported_at: string | null }, []>(
+      `SELECT reported_at FROM content_items WHERE id = ${itemId}`
+    ).get();
+    expect(row?.reported_at).toBeNull();
+  });
+
+  test("weekly card has header.template='purple'", async () => {
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as { cards: Array<{ header: { template?: string } }> };
+    expect(report.cards[0]!.header.template).toBe("purple");
+  });
+
+  test("weekly card title contains week range", async () => {
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ header: { title: { content: string } } }>;
+    };
+    const title = report.cards[0]!.header.title.content;
+    expect(title).toContain("竞品动态周报");
+    expect(title).toContain("2026-05-27"); // weekStart = 2026-06-02 - 6 days
+    expect(title).toContain(REPORT_DATE);
+  });
+
+  test("weekly card elements contain Direction Changes section", async () => {
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "directional_shift" });
+
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ elements: Array<{ tag: string; content?: string }> }>;
+    };
+    const allContent = report.cards[0]!.elements
+      .filter((e) => e.tag === "markdown")
+      .map((e) => e.content ?? "")
+      .join("\n");
+    expect(allContent).toContain("方向性变化");
+  });
+
+  test("weekly card elements contain Activity Summary section", async () => {
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "notable" });
+
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ elements: Array<{ tag: string; content?: string }> }>;
+    };
+    const allContent = report.cards[0]!.elements
+      .filter((e) => e.tag === "markdown")
+      .map((e) => e.content ?? "")
+      .join("\n");
+    expect(allContent).toContain("活动概览");
+    expect(allContent).toContain("Corp A");
+  });
+
+  test("themes section shows placeholder when fewer than 3 items", async () => {
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "notable" });
+    await seedCompletedItem({ org: "corp-b", name: "Corp B", significance: "routine", sourceUrl: "https://corp-b.com/p1" });
+
+    let llmCalled = false;
+    const trackingGenerateObject = async (_opts: unknown): Promise<{ object: WeeklyTheme }> => {
+      llmCalled = true;
+      return { object: { themes: [] } };
+    };
+
+    const stage = new ReportStage(trackingGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    expect(llmCalled).toBe(false);
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ elements: Array<{ tag: string; content?: string }> }>;
+    };
+    const allContent = report.cards[0]!.elements
+      .filter((e) => e.tag === "markdown")
+      .map((e) => e.content ?? "")
+      .join("\n");
+    expect(allContent).toContain("数据不足，跳过主题提取");
+  });
+
+  test("LLM theme extraction called with item summaries when >= 3 items", async () => {
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", sourceUrl: "https://corp-a.com/p1" });
+    await seedCompletedItem({ org: "corp-b", name: "Corp B", sourceUrl: "https://corp-b.com/p1" });
+    await seedCompletedItem({ org: "corp-c", name: "Corp C", sourceUrl: "https://corp-c.com/p1" });
+
+    let capturedPrompt = "";
+    const capturingGenerateObject = async (opts: { prompt: string }): Promise<{ object: WeeklyTheme }> => {
+      capturedPrompt = opts.prompt;
+      return { object: { themes: [{ title: "T1", description: "D1", competitors: ["Corp A"] }, { title: "T2", description: "D2", competitors: ["Corp B"] }] } };
+    };
+
+    const stage = new ReportStage(capturingGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    expect(capturedPrompt).toContain("Corp A");
+    expect(capturedPrompt).toContain("Corp B");
+    expect(capturedPrompt).toContain("Corp C");
+    expect(capturedPrompt).toContain("Summary text");
+  });
+
+  test("LLM failure is graceful: stage succeeds, no themes in output", async () => {
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", sourceUrl: "https://corp-a.com/p1" });
+    await seedCompletedItem({ org: "corp-b", name: "Corp B", sourceUrl: "https://corp-b.com/p1" });
+    await seedCompletedItem({ org: "corp-c", name: "Corp C", sourceUrl: "https://corp-c.com/p1" });
+
+    const failingGenerateObject = async (_opts: unknown): Promise<{ object: WeeklyTheme }> => {
+      throw new Error("LLM timeout");
+    };
+
+    const stage = new ReportStage(failingGenerateObject as never);
+    const result = await stage.execute(makeCTX({ mode: "weekly" }));
+
+    expect(result.success).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  test("repeated weekly runs on same date upsert (no duplicate rows)", async () => {
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const rows = db.query<{ id: number }, []>(
+      `SELECT id FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).all();
+    expect(rows.length).toBe(1);
+  });
+
+  test("daily mode unaffected by weekly implementation", async () => {
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "notable" });
+
+    const stage = new ReportStage();
+    const result = await stage.execute(makeCTX({ mode: "daily" }));
+
+    expect(result.success).toBe(true);
+    expect(result.itemsProcessed).toBe(1);
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ report_type: string }, []>(
+      `SELECT report_type FROM reports WHERE report_date = '${REPORT_DATE}'`
+    ).get();
+    expect(row?.report_type).toBe("daily");
+    expect(existsSync(`data/reports/daily-${REPORT_DATE}.json`)).toBe(true);
   });
 });

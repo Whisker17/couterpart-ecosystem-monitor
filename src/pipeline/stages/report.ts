@@ -1,8 +1,13 @@
+import { generateObject } from "ai";
+import { createAnthropic } from "@ai-sdk/anthropic";
 import { createHash } from "crypto";
 import { mkdirSync, writeFileSync } from "fs";
 import { dirname } from "path";
 import type { PipelineStage, PipelineContext, StageResult } from "../runner.js";
 import { getDb } from "../../storage/db.js";
+import { getSettings } from "../../config/settings.js";
+import { WeeklyThemeSchema } from "../../schema/analysis.js";
+import type { WeeklyTheme } from "../../schema/analysis.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -59,9 +64,16 @@ type LarkElement = LarkMarkdownElement | LarkHrElement | LarkCollapsiblePanel | 
 
 interface LarkCard {
   config: { wide_screen_mode: boolean };
-  header: { title: { tag: "plain_text"; content: string } };
+  header: { title: { tag: "plain_text"; content: string }; template?: string };
   elements: LarkElement[];
 }
+
+type GenerateObjectFn = (options: {
+  model: ReturnType<ReturnType<typeof createAnthropic>>;
+  schema: typeof WeeklyThemeSchema;
+  system: string;
+  prompt: string;
+}) => Promise<{ object: WeeklyTheme }>;
 
 interface ReportContent {
   report_date: string;
@@ -81,6 +93,17 @@ interface ReportContent {
     why_we_care: string | null;
   }>;
   cards: LarkCard[];
+}
+
+interface WeeklyRow extends UnreportedRow {}
+
+interface ActivitySummary {
+  competitor_name: string;
+  competitor_org: string;
+  total: number;
+  directional_shift: number;
+  notable: number;
+  routine: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -233,13 +256,320 @@ function buildLarkCards(
 }
 
 // ---------------------------------------------------------------------------
+// Weekly helpers
+// ---------------------------------------------------------------------------
+
+function computeWeekStart(reportDate: string): string {
+  const d = new Date(reportDate + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() - 6);
+  return d.toISOString().slice(0, 10);
+}
+
+function buildActivitySummaries(items: WeeklyRow[]): ActivitySummary[] {
+  const map = new Map<string, ActivitySummary>();
+  for (const item of items) {
+    const key = item.competitor_org;
+    if (!map.has(key)) {
+      map.set(key, {
+        competitor_name: item.competitor_name,
+        competitor_org: item.competitor_org,
+        total: 0,
+        directional_shift: 0,
+        notable: 0,
+        routine: 0,
+      });
+    }
+    const s = map.get(key)!;
+    s.total++;
+    s[item.significance]++;
+  }
+  return [...map.values()].sort((a, b) => a.competitor_name.localeCompare(b.competitor_name));
+}
+
+async function extractWeeklyThemes(
+  items: WeeklyRow[],
+  generateObjectFn: GenerateObjectFn
+): Promise<WeeklyTheme["themes"]> {
+  if (items.length < 3) {
+    return [];
+  }
+
+  const settings = getSettings();
+  const baseUrl = process.env[settings.llm.baseUrlEnvVar];
+  const apiKey = process.env[settings.llm.apiKeyEnvVar];
+  const anthropic = createAnthropic({ baseURL: baseUrl, apiKey: apiKey ?? "" });
+
+  const context = items
+    .map((i) => `[${i.competitor_name}] ${i.significance} — ${i.summary}`)
+    .join("\n");
+
+  try {
+    const { object } = await generateObjectFn({
+      model: anthropic(settings.llm.model),
+      schema: WeeklyThemeSchema,
+      system: "你是一名竞品情报分析师，负责从多个竞品的周度动态中提取共同主题和趋势。",
+      prompt: `以下是本周各竞品动态摘要，请提取2-3个最重要的跨竞品主题趋势：\n\n${context}`,
+    });
+    return object.themes;
+  } catch (err) {
+    console.error("[report] weekly theme extraction failed:", err instanceof Error ? err.message : String(err));
+    return [];
+  }
+}
+
+function buildWeeklyLarkCards(
+  items: WeeklyRow[],
+  reportDate: string,
+  themes: WeeklyTheme["themes"]
+): LarkCard[] {
+  const weekStart = computeWeekStart(reportDate);
+  const baseTitle = `竞品动态周报 - ${weekStart} ~ ${reportDate}`;
+
+  const directionItems = items.filter((i) => i.significance === "directional_shift");
+  const activitySummaries = buildActivitySummaries(items);
+
+  const grouped = new Map<string, WeeklyRow[]>();
+  for (const item of items) {
+    const key = item.competitor_org;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key)!.push(item);
+  }
+
+  function buildCard(cardItems: WeeklyRow[], headerTitle: string): LarkCard {
+    const elements: LarkElement[] = [];
+
+    // Direction Changes section
+    elements.push({ tag: "markdown", content: `## 方向性变化 (${directionItems.length})` });
+    if (directionItems.length > 0) {
+      for (const item of directionItems) {
+        elements.push({ tag: "markdown", content: buildItemSummaryLine(item) });
+      }
+    } else {
+      elements.push({ tag: "markdown", content: "_本周无方向性变化。_" });
+    }
+    elements.push({ tag: "hr" });
+
+    // Activity Summary section
+    elements.push({ tag: "markdown", content: "## 活动概览" });
+    const summaryLines = activitySummaries.map(
+      (s) =>
+        `**${s.competitor_name}**：共 ${s.total} 条（方向性变化 ${s.directional_shift} / 值得关注 ${s.notable} / 常规 ${s.routine}）`
+    );
+    elements.push({ tag: "markdown", content: summaryLines.join("\n") || "_本周无动态。_" });
+    elements.push({ tag: "hr" });
+
+    // Cross-Competitor Themes section
+    elements.push({ tag: "markdown", content: "## 跨竞品主题" });
+    if (items.length < 3) {
+      elements.push({ tag: "markdown", content: "数据不足，跳过主题提取" });
+    } else if (themes.length === 0) {
+      elements.push({ tag: "markdown", content: "_主题提取不可用。_" });
+    } else {
+      for (const theme of themes) {
+        const competitorStr = theme.competitors.join("、");
+        elements.push({
+          tag: "markdown",
+          content: `**${theme.title}**（涉及：${competitorStr}）\n${theme.description}`,
+        });
+      }
+    }
+    elements.push({ tag: "hr" });
+
+    // Per-competitor collapsible panels
+    for (const [, compItems] of grouped) {
+      const sorted = [...compItems].sort(
+        (a, b) => (SIGNIFICANCE_ORDER[a.significance] ?? 99) - (SIGNIFICANCE_ORDER[b.significance] ?? 99)
+      );
+      for (const item of sorted) {
+        elements.push(buildCollapsiblePanel(item));
+      }
+    }
+
+    if (cardItems.length === 0) {
+      elements.push({ tag: "markdown", content: "本周无新动态。" });
+    }
+
+    return {
+      config: { wide_screen_mode: true },
+      header: {
+        title: { tag: "plain_text", content: headerTitle },
+        template: "purple",
+      },
+      elements,
+    };
+  }
+
+  const singleCard = buildCard(items, baseTitle);
+  const singleJson = JSON.stringify(singleCard);
+
+  if (singleJson.length <= 20 * 1024) {
+    return [singleCard];
+  }
+
+  const trimmedItems = items.filter((i) => i.significance !== "routine");
+  const routineCount = items.length - trimmedItems.length;
+  const trimmedCard = buildCard(trimmedItems, baseTitle);
+  if (routineCount > 0) {
+    trimmedCard.elements.push({
+      tag: "markdown",
+      content: `_已省略 ${routineCount} 条常规更新以控制卡片大小。_`,
+    });
+  }
+
+  if (JSON.stringify(trimmedCard).length <= 30 * 1024) {
+    return [trimmedCard];
+  }
+
+  const cards: LarkCard[] = [];
+  let cardIndex = 0;
+  for (const [org, compItems] of grouped) {
+    const competitorName = compItems[0]!.competitor_name;
+    const cardTitle = `${competitorName} — ${baseTitle} (${cardIndex + 1}/${grouped.size})`;
+    cards.push(buildCard(compItems, cardTitle));
+    cardIndex++;
+  }
+  return cards;
+}
+
+// ---------------------------------------------------------------------------
 // ReportStage
 // ---------------------------------------------------------------------------
 
 export class ReportStage implements PipelineStage {
   readonly name = "report";
+  private readonly generateObjectFn: GenerateObjectFn;
+
+  constructor(generateObjectFn?: GenerateObjectFn) {
+    this.generateObjectFn = generateObjectFn ?? (generateObject as unknown as GenerateObjectFn);
+  }
+
+  private async executeWeekly(ctx: PipelineContext): Promise<StageResult> {
+    const db = getDb();
+    const errors: string[] = [];
+
+    const rows = db.query<WeeklyRow, []>(`
+      SELECT
+        ci.id            AS item_id,
+        ci.competitor_id,
+        c.name           AS competitor_name,
+        c.org            AS competitor_org,
+        ci.source,
+        ci.source_url,
+        ci.title,
+        ci.published_at,
+        a.summary,
+        a.technical_detail,
+        a.category,
+        a.direction_signal,
+        a.significance,
+        a.urgency,
+        a.sentiment,
+        a.why_we_care
+      FROM content_items ci
+      JOIN competitors c    ON c.id = ci.competitor_id
+      JOIN analyses a       ON a.content_item_id = ci.id
+      WHERE ci.analysis_status = 'complete'
+        AND a.analyzed_at >= datetime('now', '-7 days')
+      ORDER BY c.name ASC
+    `).all();
+
+    const sorted = [...rows].sort((a, b) => {
+      if (a.competitor_org !== b.competitor_org) {
+        return a.competitor_name.localeCompare(b.competitor_name);
+      }
+      return (SIGNIFICANCE_ORDER[a.significance] ?? 99) - (SIGNIFICANCE_ORDER[b.significance] ?? 99);
+    });
+
+    const themes = await extractWeeklyThemes(sorted, this.generateObjectFn);
+    const cards = buildWeeklyLarkCards(sorted, ctx.reportDate, themes);
+
+    const reportContent = {
+      report_date: ctx.reportDate,
+      report_type: "weekly",
+      items: sorted.map((r) => ({
+        item_id: r.item_id,
+        competitor_name: r.competitor_name,
+        competitor_org: r.competitor_org,
+        source: r.source,
+        source_url: r.source_url,
+        title: r.title,
+        significance: r.significance,
+        summary: r.summary,
+        direction_signal: r.direction_signal,
+        why_we_care: r.why_we_care,
+      })),
+      themes,
+      cards,
+    };
+
+    const reportJson = JSON.stringify(reportContent, null, 2);
+    const contentHash = createHash("sha256").update(reportJson).digest("hex");
+
+    const filePath = `data/reports/weekly-${ctx.reportDate}.json`;
+    try {
+      mkdirSync(dirname(filePath), { recursive: true });
+      writeFileSync(filePath, reportJson, "utf-8");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`Failed to write report file: ${msg}`);
+    }
+
+    const notableCount = sorted.filter(
+      (r) => r.significance === "notable" || r.significance === "directional_shift"
+    ).length;
+
+    const stmtGetReport = db.prepare<{ id: number; content_hash: string | null }, [string]>(`
+      SELECT id, content_hash FROM reports WHERE report_date = ? AND report_type = 'weekly'
+    `);
+
+    const stmtUpsertReport = db.prepare(`
+      INSERT INTO reports (report_date, report_type, content, item_count, notable_count, is_partial, content_hash)
+      VALUES (?, 'weekly', ?, ?, ?, 0, ?)
+      ON CONFLICT(report_date, report_type) DO UPDATE SET
+        content        = excluded.content,
+        item_count     = excluded.item_count,
+        notable_count  = excluded.notable_count,
+        content_hash   = excluded.content_hash,
+        sent_at        = CASE WHEN excluded.content_hash != reports.content_hash THEN NULL ELSE reports.sent_at END
+    `);
+
+    const stmtDeleteDeliveries = db.prepare(`DELETE FROM report_deliveries WHERE report_id = ?`);
+
+    const stmtInsertDelivery = db.prepare(`
+      INSERT INTO report_deliveries (report_id, card_index, card_content, delivery_status)
+      VALUES (?, ?, ?, 'pending')
+    `);
+
+    db.transaction(() => {
+      const before = stmtGetReport.get(ctx.reportDate);
+      const prevHash = before?.content_hash ?? null;
+
+      stmtUpsertReport.run(ctx.reportDate, reportJson, sorted.length, notableCount, contentHash);
+
+      const report = stmtGetReport.get(ctx.reportDate)!;
+      const hashChanged = prevHash !== contentHash;
+
+      if (hashChanged) {
+        stmtDeleteDeliveries.run(report.id);
+        for (let i = 0; i < cards.length; i++) {
+          stmtInsertDelivery.run(report.id, i, JSON.stringify(cards[i]));
+        }
+      }
+    })();
+
+    return {
+      success: errors.length === 0,
+      itemsProcessed: sorted.length,
+      errors,
+      durationMs: 0,
+    };
+  }
 
   async execute(ctx: PipelineContext): Promise<StageResult> {
+    if (ctx.mode === "weekly") {
+      return this.executeWeekly(ctx);
+    }
+
     const db = getDb();
     const errors: string[] = [];
 
