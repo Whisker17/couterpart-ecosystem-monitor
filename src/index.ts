@@ -3,6 +3,10 @@ import { collectStage } from "./pipeline/stages/collect.js";
 import { analyzeStage } from "./pipeline/stages/analyze.js";
 import { dispatchStage } from "./pipeline/stages/dispatch.js";
 import { reportStage } from "./pipeline/stages/report.js";
+import { getDb } from "./storage/db.js";
+
+// Initialize the database on startup so data/monitor.db is created immediately.
+getDb();
 
 const stages = [collectStage, analyzeStage, dispatchStage, reportStage];
 const scheduler = createScheduler(stages);

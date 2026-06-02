@@ -18,8 +18,10 @@ function initDb(): Database {
 
   const db = new Database(dbPath, { create: true });
 
-  db.exec("PRAGMA journal_mode=WAL");
+  // busy_timeout must be first: sets the retry window before any
+  // potentially lock-taking pragma (journal_mode=WAL needs an exclusive lock).
   db.exec("PRAGMA busy_timeout=5000");
+  db.exec("PRAGMA journal_mode=WAL");
   db.exec("PRAGMA temp_store=MEMORY");
   db.exec("PRAGMA cache_size=-64000");
   db.exec("PRAGMA mmap_size=268435456");
