@@ -19,7 +19,7 @@ export function startup(
   const stages = [collectStage, analyzeStage, reportStage, dispatchStage];
   const scheduler = createSchedulerFn(stages);
   scheduler.start();
-  console.log("[index] scheduler started — daily 08:00, weekly Mon 09:00 (Asia/Shanghai)");
+  console.log("[index] scheduler started");
 }
 
 export async function runNow(mode: "daily" | "weekly") {
