@@ -1,25 +1,33 @@
 import { Cron } from "croner";
 import { runPipeline, type PipelineStage, type PipelineContext } from "../pipeline/runner.js";
+import { getSettings } from "../config/settings.js";
 
 export interface Scheduler {
   start(): Scheduler;
   stop(): void;
   runNow(mode: "daily" | "weekly"): Promise<PipelineContext>;
+  readonly cronExpressions: { daily: string; weekly: string };
 }
 
 export function createScheduler(
   stages: PipelineStage[],
-  opts: { timezone?: string } = {}
+  opts: { timezone?: string; dailyCron?: string; weeklyCron?: string } = {}
 ): Scheduler {
+  const settings = getSettings();
   const timezone = opts.timezone ?? "Asia/Shanghai";
+  const dailyCron = opts.dailyCron ?? settings.schedule.dailyCron;
+  const weeklyCron = opts.weeklyCron ?? settings.schedule.weeklyCron;
   const jobs: Cron[] = [];
 
   const self: Scheduler = {
+    get cronExpressions() {
+      return { daily: dailyCron, weekly: weeklyCron };
+    },
+
     start(): Scheduler {
-      // Daily at 08:00 in the configured timezone
       jobs.push(
         new Cron(
-          "0 8 * * *",
+          dailyCron,
           { timezone, name: "daily-pipeline" },
           async () => {
             console.log("[scheduler] daily pipeline triggered");
@@ -28,10 +36,9 @@ export function createScheduler(
         )
       );
 
-      // Weekly on Monday at 09:00 in the configured timezone
       jobs.push(
         new Cron(
-          "0 9 * * 1",
+          weeklyCron,
           { timezone, name: "weekly-pipeline" },
           async () => {
             console.log("[scheduler] weekly pipeline triggered");
