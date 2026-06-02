@@ -1,52 +1,52 @@
 [
   {
-    "name": "Optimism",
-    "org": "optimism",
-    "blogRssUrl": "https://optimism.mirror.xyz/feed",
-    "xHandle": "optimismFND",
+    "name": "Ethereum Foundation",
+    "org": "ethereum",
+    "blogRssUrl": "https://blog.ethereum.org/feed.xml",
+    "xHandle": "ethereum",
     "xEnabled": false,
-    "websiteUrl": "https://www.optimism.io",
-    "tags": ["layer2", "op-stack"],
-    "rssQuality": "full"
+    "websiteUrl": "https://ethereum.org",
+    "tags": ["layer1", "research"],
+    "rssQuality": "truncated"
   },
   {
     "name": "Arbitrum",
     "org": "arbitrum",
-    "blogRssUrl": "https://arbitrumfoundation.medium.com/feed",
+    "blogRssUrl": "https://blog.arbitrum.io/rss/",
     "xHandle": "arbitrum",
     "xEnabled": false,
     "websiteUrl": "https://arbitrum.io",
     "tags": ["layer2", "rollup"],
-    "rssQuality": "truncated"
-  },
-  {
-    "name": "Polygon",
-    "org": "polygon",
-    "blogRssUrl": "https://polygon.technology/blog/feed",
-    "xHandle": "0xPolygon",
-    "xEnabled": false,
-    "websiteUrl": "https://polygon.technology",
-    "tags": ["layer2", "zkevm"],
     "rssQuality": "full"
   },
   {
-    "name": "zkSync",
-    "org": "zksync",
-    "blogRssUrl": "https://zksync.mirror.xyz/feed",
+    "name": "Chainlink",
+    "org": "chainlink",
+    "blogRssUrl": "https://blog.chain.link/rss/",
+    "xHandle": "chainlink",
+    "xEnabled": false,
+    "websiteUrl": "https://chain.link",
+    "tags": ["oracle", "infrastructure"],
+    "rssQuality": "truncated"
+  },
+  {
+    "name": "Vitalik Buterin",
+    "org": "vitalik",
+    "blogRssUrl": "https://vitalik.eth.limo/feed.xml",
+    "xHandle": "VitalikButerin",
+    "xEnabled": false,
+    "websiteUrl": "https://vitalik.eth.limo",
+    "tags": ["research", "ethereum"],
+    "rssQuality": "title_only"
+  },
+  {
+    "name": "Matter Labs",
+    "org": "matter-labs",
+    "blogRssUrl": "https://blog.matter-labs.io/feed",
     "xHandle": "zksync",
     "xEnabled": false,
-    "websiteUrl": "https://zksync.io",
+    "websiteUrl": "https://matter-labs.io",
     "tags": ["layer2", "zk-rollup"],
     "rssQuality": "full"
-  },
-  {
-    "name": "StarkWare",
-    "org": "starkware",
-    "blogRssUrl": "https://starkware.co/blog/feed",
-    "xHandle": "StarkWareLtd",
-    "xEnabled": false,
-    "websiteUrl": "https://starkware.co",
-    "tags": ["layer2", "stark"],
-    "rssQuality": "truncated"
   }
 ]
