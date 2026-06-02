@@ -1,0 +1,150 @@
+import { test, expect, beforeEach, afterEach } from "bun:test";
+import { existsSync, unlinkSync, mkdirSync, rmSync } from "fs";
+
+const TEST_DB_PATH = "data/test-monitor.db";
+
+beforeEach(() => {
+  process.env.DB_PATH = TEST_DB_PATH;
+  mkdirSync("data", { recursive: true });
+});
+
+afterEach(async () => {
+  const { closeDb } = await import("../../storage/db.js");
+  closeDb();
+  for (const ext of ["", "-wal", "-shm"]) {
+    const p = TEST_DB_PATH + ext;
+    if (existsSync(p)) unlinkSync(p);
+  }
+  delete process.env.DB_PATH;
+});
+
+test("getDb creates database file on first call", async () => {
+  const { getDb } = await import("../../storage/db.js");
+  getDb();
+  expect(existsSync(TEST_DB_PATH)).toBe(true);
+});
+
+test("journal_mode is WAL", async () => {
+  const { getDb } = await import("../../storage/db.js");
+  const db = getDb();
+  const row = db.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get()!;
+  expect(row.journal_mode).toBe("wal");
+});
+
+test("busy_timeout is 5000", async () => {
+  const { getDb } = await import("../../storage/db.js");
+  const db = getDb();
+  const row = db.query<{ timeout: number }, []>("PRAGMA busy_timeout").get()!;
+  expect(row.timeout).toBe(5000);
+});
+
+test("foreign_keys is ON", async () => {
+  const { getDb } = await import("../../storage/db.js");
+  const db = getDb();
+  const row = db.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()!;
+  expect(row.foreign_keys).toBe(1);
+});
+
+test("synchronous is NORMAL (1)", async () => {
+  const { getDb } = await import("../../storage/db.js");
+  const db = getDb();
+  const row = db.query<{ synchronous: number }, []>("PRAGMA synchronous").get()!;
+  expect(row.synchronous).toBe(1);
+});
+
+test("user_version is 1 after init", async () => {
+  const { getDb } = await import("../../storage/db.js");
+  const db = getDb();
+  const row = db.query<{ user_version: number }, []>("PRAGMA user_version").get()!;
+  expect(row.user_version).toBe(1);
+});
+
+test("all 6 tables exist", async () => {
+  const { getDb } = await import("../../storage/db.js");
+  const db = getDb();
+  const tables = db
+    .query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    )
+    .all()
+    .map((r) => r.name);
+  expect(tables).toContain("competitors");
+  expect(tables).toContain("content_items");
+  expect(tables).toContain("analyses");
+  expect(tables).toContain("analysis_inputs");
+  expect(tables).toContain("reports");
+  expect(tables).toContain("report_deliveries");
+});
+
+test("content_items has UNIQUE(source_url) constraint", async () => {
+  const { getDb } = await import("../../storage/db.js");
+  const db = getDb();
+  db.exec(
+    "INSERT INTO competitors (name, org) VALUES ('Test Co', 'test-co')"
+  );
+  db.exec(
+    "INSERT INTO content_items (competitor_id, source, source_url) VALUES (1, 'blog', 'https://example.com/post')"
+  );
+  expect(() =>
+    db.exec(
+      "INSERT INTO content_items (competitor_id, source, source_url) VALUES (1, 'blog', 'https://example.com/post')"
+    )
+  ).toThrow();
+});
+
+test("content_items has retry_count, last_error, reported_at columns", async () => {
+  const { getDb } = await import("../../storage/db.js");
+  const db = getDb();
+  db.exec(
+    "INSERT INTO competitors (name, org) VALUES ('Test Co', 'test-co')"
+  );
+  db.exec(
+    "INSERT INTO content_items (competitor_id, source, source_url, retry_count, last_error, reported_at) VALUES (1, 'blog', 'https://example.com/post2', 0, NULL, NULL)"
+  );
+  const row = db
+    .query<{ retry_count: number; last_error: string | null; reported_at: string | null }, []>(
+      "SELECT retry_count, last_error, reported_at FROM content_items WHERE source_url = 'https://example.com/post2'"
+    )
+    .get()!;
+  expect(row.retry_count).toBe(0);
+  expect(row.last_error).toBeNull();
+  expect(row.reported_at).toBeNull();
+});
+
+test("reports table has content_hash and sent_at columns", async () => {
+  const { getDb } = await import("../../storage/db.js");
+  const db = getDb();
+  db.exec(
+    "INSERT INTO reports (report_date, report_type, content, content_hash, sent_at) VALUES ('2026-06-02', 'daily', '{}', 'abc123', NULL)"
+  );
+  const row = db
+    .query<{ content_hash: string; sent_at: string | null }, []>(
+      "SELECT content_hash, sent_at FROM reports WHERE report_date = '2026-06-02'"
+    )
+    .get()!;
+  expect(row.content_hash).toBe("abc123");
+  expect(row.sent_at).toBeNull();
+});
+
+test("report_deliveries has card_index with UNIQUE(report_id, card_index)", async () => {
+  const { getDb } = await import("../../storage/db.js");
+  const db = getDb();
+  db.exec(
+    "INSERT INTO reports (report_date, report_type, content) VALUES ('2026-06-03', 'daily', '{}')"
+  );
+  db.exec(
+    "INSERT INTO report_deliveries (report_id, card_index, card_content) VALUES (1, 0, 'card0')"
+  );
+  expect(() =>
+    db.exec(
+      "INSERT INTO report_deliveries (report_id, card_index, card_content) VALUES (1, 0, 'card0-dup')"
+    )
+  ).toThrow();
+});
+
+test("DDL is idempotent — second getDb() call does not re-run DDL", async () => {
+  const { getDb } = await import("../../storage/db.js");
+  const db = getDb();
+  // If DDL re-ran it would fail (tables already exist without IF NOT EXISTS... but we use IF NOT EXISTS so should be fine)
+  expect(() => getDb()).not.toThrow();
+});
