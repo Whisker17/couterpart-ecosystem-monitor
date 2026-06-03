@@ -166,15 +166,21 @@ describe("collectStage.execute", () => {
     expect(result.competitorStatuses!.length).toBe(2);
   });
 
-  test("first sync: collectFn called with undefined since when no last_synced_at", async () => {
-    let capturedSince: Date | undefined = new Date("3000-01-01"); // sentinel
+  test("first sync: collectFn called with a 30-day lookback Date when no last_synced_at", async () => {
+    let capturedSince: Date | undefined = undefined;
     const stage = new CollectStage(
       () => [COMPETITOR_WITH_RSS],
       async (_comp, since) => { capturedSince = since; return []; }
     );
 
+    const before = Date.now();
     await stage.execute(CTX);
-    expect(capturedSince).toBeUndefined();
+    const after = Date.now();
+
+    expect(capturedSince).toBeInstanceOf(Date);
+    const expectedMs = 30 * 24 * 60 * 60 * 1000;
+    expect(before - capturedSince!.getTime()).toBeGreaterThanOrEqual(expectedMs - 1000);
+    expect(after - capturedSince!.getTime()).toBeLessThanOrEqual(expectedMs + 1000);
   });
 
   test("subsequent sync: passes last_synced_at as since to collectFn", async () => {

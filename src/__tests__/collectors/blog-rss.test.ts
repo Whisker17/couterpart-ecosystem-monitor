@@ -161,4 +161,16 @@ describe("collectFromRss", () => {
     });
     expect(result[0]!.inputQuality).toBe("metadata_only");
   });
+
+  test("sets inputQuality=truncated when article-extractor times out", async () => {
+    // Extractor that never resolves (simulates a hang)
+    const hangingExtractor: ExtractorFn = () => new Promise(() => {});
+
+    const result = await collectFromRss(COMPETITOR, undefined, {
+      parser: makeParser([makeFeedItem({ content: "Short" })]),
+      extractor: hangingExtractor,
+    });
+    expect(result[0]!.inputQuality).toBe("truncated");
+    expect(result[0]!.content).toBe("Short");
+  }, 20_000);
 });

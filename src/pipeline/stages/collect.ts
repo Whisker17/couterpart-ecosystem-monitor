@@ -71,7 +71,11 @@ export class CollectStage implements PipelineStage {
 
         if (competitor.blogRssUrl) {
           rssEnabledCount++;
-          const since = lastSyncedAt ? new Date(lastSyncedAt) : undefined;
+          // First run: limit to last 30 days to avoid fetching all historical items
+          const DEFAULT_LOOKBACK_DAYS = 30;
+          const since = lastSyncedAt
+            ? new Date(lastSyncedAt)
+            : new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
           const items = await this.collectFn(competitor, since);
           for (const item of items) {
             insertItem.run(

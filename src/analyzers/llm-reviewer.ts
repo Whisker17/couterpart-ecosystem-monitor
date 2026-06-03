@@ -84,8 +84,14 @@ export async function reviewContent(
   const baseUrl = process.env[settings.llm.baseUrlEnvVar];
   const apiKey = process.env[settings.llm.apiKeyEnvVar];
 
+  // @ai-sdk/anthropic appends /messages to baseURL (not /v1/messages), so ensure /v1 is present
+  const normalizedBaseUrl = baseUrl
+    ? baseUrl.replace(/\/+$/, "").endsWith("/v1")
+      ? baseUrl.replace(/\/+$/, "")
+      : `${baseUrl.replace(/\/+$/, "")}/v1`
+    : baseUrl;
   const anthropic = createAnthropic({
-    baseURL: baseUrl,
+    baseURL: normalizedBaseUrl,
     apiKey: apiKey ?? "",
   });
 

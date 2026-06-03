@@ -295,8 +295,14 @@ async function extractWeeklyThemes(
   }
 
   const settings = getSettings();
-  const baseUrl = process.env[settings.llm.baseUrlEnvVar];
+  const rawBaseUrl = process.env[settings.llm.baseUrlEnvVar];
   const apiKey = process.env[settings.llm.apiKeyEnvVar];
+  // @ai-sdk/anthropic appends /messages to baseURL (not /v1/messages), so ensure /v1 is present
+  const baseUrl = rawBaseUrl
+    ? rawBaseUrl.replace(/\/+$/, "").endsWith("/v1")
+      ? rawBaseUrl.replace(/\/+$/, "")
+      : `${rawBaseUrl.replace(/\/+$/, "")}/v1`
+    : rawBaseUrl;
   const anthropic = createAnthropic({ baseURL: baseUrl, apiKey: apiKey ?? "" });
 
   const context = items

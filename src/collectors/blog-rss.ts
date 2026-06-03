@@ -54,9 +54,13 @@ async function resolveContent(
     return { content: rssContent, inputQuality: "full" };
   }
 
-  // Short RSS content — attempt full-text extraction
+  // Short RSS content — attempt full-text extraction with a timeout guard
+  const EXTRACTOR_TIMEOUT_MS = 15_000;
   try {
-    const extracted = await extractor(url);
+    const extracted = await Promise.race([
+      extractor(url),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), EXTRACTOR_TIMEOUT_MS)),
+    ]);
     if (extracted?.content) {
       return { content: extracted.content, inputQuality: "full" };
     }
@@ -81,7 +85,7 @@ export async function collectFromRss(
 ): Promise<CollectedItem[]> {
   if (!competitor.blogRssUrl) return [];
 
-  const parser = deps?.parser ?? new Parser();
+  const parser = deps?.parser ?? new Parser({ timeout: 20000 });
   const extractor = deps?.extractor ?? articleExtract;
   const feed = await parser.parseURL(competitor.blogRssUrl);
 
