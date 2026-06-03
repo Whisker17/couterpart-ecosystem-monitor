@@ -168,7 +168,7 @@ describe("AnalyzeStage.execute", () => {
     expect(auditRow?.content_item_id).toBe(1);
     expect(auditRow?.analysis_id).not.toBeNull();
     expect(auditRow?.attempt).toBe(1);
-    expect(auditRow?.prompt_version).toBe("v1");
+    expect(auditRow?.prompt_version).toBe("v2");
     expect(auditRow?.error).toBeNull();
   });
 
