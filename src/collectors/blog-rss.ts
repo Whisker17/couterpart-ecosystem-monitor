@@ -18,7 +18,8 @@ export type RssParserLike = {
 };
 
 export type ExtractorFn = (
-  url: string
+  url: string,
+  signal?: AbortSignal
 ) => Promise<{ content?: string | null } | null | undefined>;
 
 const CONTENT_THRESHOLD = 500;
@@ -54,19 +55,22 @@ async function resolveContent(
     return { content: rssContent, inputQuality: "full" };
   }
 
-  // Short RSS content — attempt full-text extraction with a timeout guard
+  // Short RSS content — attempt full-text extraction; abort and release network
+  // resources if the extractor takes too long. clearTimeout in finally ensures
+  // the timer is cleared when extraction finishes early (avoids event-loop leak).
   const EXTRACTOR_TIMEOUT_MS = 15_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), EXTRACTOR_TIMEOUT_MS);
   try {
-    const extracted = await Promise.race([
-      extractor(url),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), EXTRACTOR_TIMEOUT_MS)),
-    ]);
+    const extracted = await extractor(url, controller.signal);
     if (extracted?.content) {
       return { content: extracted.content, inputQuality: "full" };
     }
     return { content: rssContent, inputQuality: "truncated" };
   } catch {
     return { content: rssContent, inputQuality: "truncated" };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -86,7 +90,8 @@ export async function collectFromRss(
   if (!competitor.blogRssUrl) return [];
 
   const parser = deps?.parser ?? new Parser({ timeout: 20000 });
-  const extractor = deps?.extractor ?? articleExtract;
+  const extractor = deps?.extractor ?? ((url: string, signal?: AbortSignal) =>
+    articleExtract(url, undefined, { signal }));
   const feed = await parser.parseURL(competitor.blogRssUrl);
 
   const existingUrls = getExistingUrls();

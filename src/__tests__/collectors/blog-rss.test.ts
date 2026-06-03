@@ -163,8 +163,14 @@ describe("collectFromRss", () => {
   });
 
   test("sets inputQuality=truncated when article-extractor times out", async () => {
-    // Extractor that never resolves (simulates a hang)
-    const hangingExtractor: ExtractorFn = () => new Promise(() => {});
+    // Extractor that hangs but respects the AbortSignal — rejects on abort so
+    // the test completes quickly (~15 s) instead of waiting the full 20 s timeout.
+    const hangingExtractor: ExtractorFn = (_url, signal) =>
+      new Promise((_, reject) => {
+        signal?.addEventListener("abort", () =>
+          reject(new DOMException("The operation was aborted.", "AbortError"))
+        );
+      });
 
     const result = await collectFromRss(COMPETITOR, undefined, {
       parser: makeParser([makeFeedItem({ content: "Short" })]),
