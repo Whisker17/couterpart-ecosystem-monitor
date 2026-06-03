@@ -11,12 +11,24 @@ export interface Scheduler {
   readonly cronExpressions: { daily: string; weekly: string };
 }
 
+function validateTimezone(tz: string): void {
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: tz });
+  } catch {
+    throw new Error(
+      `Invalid IANA timezone "${tz}" in settings.schedule.timezone. ` +
+      `Use a valid IANA timezone identifier (e.g. "Asia/Shanghai", "UTC").`
+    );
+  }
+}
+
 export function createScheduler(
   stages: PipelineStage[],
   opts: { timezone?: string; dailyCron?: string; weeklyCron?: string } = {}
 ): Scheduler {
   const settings = getSettings();
-  const timezone = opts.timezone ?? "Asia/Shanghai";
+  const timezone = opts.timezone ?? settings.schedule.timezone;
+  validateTimezone(timezone);
   const dailyCron = opts.dailyCron ?? settings.schedule.dailyCron;
   const weeklyCron = opts.weeklyCron ?? settings.schedule.weeklyCron;
   const jobs: Cron[] = [];
