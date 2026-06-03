@@ -109,6 +109,34 @@ describe("archiveReports", () => {
 
     expect(existsSync(TEST_ARCHIVE_DIR)).toBe(false);
   });
+
+  test("handles FK constraint: deletes report_deliveries before reports (foreign_keys=ON)", async () => {
+    // Use an in-memory DB with foreign_keys=ON to reproduce the production crash
+    const db = new Database(":memory:");
+    db.exec("PRAGMA foreign_keys=ON");
+    db.exec(DDL);
+
+    // Insert old report with a delivery row
+    db.exec(
+      `INSERT INTO reports (report_date, report_type, content, created_at) VALUES ('2025-01-10', 'daily', '{}', '2025-01-10 00:00:00')`
+    );
+    const report = db.query<{ id: number }, []>("SELECT id FROM reports").get()!;
+    db.exec(
+      `INSERT INTO report_deliveries (report_id, card_content) VALUES (${report.id}, 'card')`
+    );
+
+    const archiveDir = `${TEST_ARCHIVE_DIR}/fk-test`;
+    await expect(archiveReports(db, archiveDir)).resolves.toBeUndefined();
+
+    const remaining = db.query<{ id: number }, []>("SELECT id FROM reports").all();
+    expect(remaining.length).toBe(0);
+
+    const deliveries = db.query<{ id: number }, []>("SELECT id FROM report_deliveries").all();
+    expect(deliveries.length).toBe(0);
+
+    expect(existsSync(`${archiveDir}/2025-01/reports.jsonl`)).toBe(true);
+    db.close();
+  });
 });
 
 describe("vacuumDb", () => {

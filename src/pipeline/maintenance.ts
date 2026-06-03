@@ -20,17 +20,22 @@ export async function archiveReports(
     return;
   }
 
-  for (const row of rows) {
-    const createdAt = row.created_at;
-    const month = createdAt.slice(0, 7); // "YYYY-MM"
-    const dir = join(archiveDir, month);
-    mkdirSync(dir, { recursive: true });
-    const filePath = join(dir, "reports.jsonl");
-    appendFileSync(filePath, JSON.stringify(row) + "\n", "utf-8");
-  }
-
   const ids = rows.map((r) => r.id).join(",");
-  db.exec(`DELETE FROM reports WHERE id IN (${ids})`);
+
+  // Wrap JSONL write + cascade deletes in a single transaction.
+  // report_deliveries has a FK to reports, so deliveries must be removed first.
+  const archiveOp = db.transaction(() => {
+    for (const row of rows) {
+      const month = row.created_at.slice(0, 7); // "YYYY-MM"
+      const dir = join(archiveDir, month);
+      mkdirSync(dir, { recursive: true });
+      appendFileSync(join(dir, "reports.jsonl"), JSON.stringify(row) + "\n", "utf-8");
+    }
+    db.exec(`DELETE FROM report_deliveries WHERE report_id IN (${ids})`);
+    db.exec(`DELETE FROM reports WHERE id IN (${ids})`);
+  });
+
+  archiveOp();
 
   console.log(`[maintenance] archiveReports: archived ${rows.length} report(s)`);
 }
