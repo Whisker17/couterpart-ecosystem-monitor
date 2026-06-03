@@ -5,6 +5,8 @@ import { getSettings } from "../../config/settings.js";
 import { reviewContent } from "../../analyzers/llm-reviewer.js";
 import { withRetry } from "../../utils/retry.js";
 import type { ReviewInput, ReviewResult, GenerateObjectFn } from "../../analyzers/llm-reviewer.js";
+import { getBudgetStatus, buildBudgetAlertCard } from "../../utils/budget-tracker.js";
+import { sendCard } from "./dispatch.js";
 
 type SleepFn = (ms: number) => Promise<void>;
 
@@ -40,9 +42,6 @@ interface PendingItem {
   retry_count: number;
 }
 
-interface MonthlySpend {
-  total: number | null;
-}
 
 export class AnalyzeStage implements PipelineStage {
   readonly name = "analyze";
@@ -83,18 +82,6 @@ export class AnalyzeStage implements PipelineStage {
       return { success: true, itemsProcessed: 0, errors: [], durationMs: 0 };
     }
 
-    const now = new Date();
-    // Use 'YYYY-MM-01 00:00:00' SQLite datetime format. toISOString() produces
-    // 'YYYY-MM-DDT...' (with 'T'), which compares incorrectly against SQLite's
-    // datetime('now') default format 'YYYY-MM-DD HH:MM:SS' (space, not 'T').
-    const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01 00:00:00`;
-
-    const selectMonthlySpend = db.prepare<MonthlySpend, [string]>(`
-      SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total
-      FROM analyses
-      WHERE datetime(analyzed_at) >= datetime(?)
-    `);
-
     const insertAnalysis = db.prepare(`
       INSERT INTO analyses
         (content_item_id, summary, technical_detail, category, direction_signal,
@@ -122,18 +109,31 @@ export class AnalyzeStage implements PipelineStage {
       WHERE id = ?
     `);
 
-    for (const item of pendingItems) {
-      // Budget hard cap check before each item
-      const spend = selectMonthlySpend.get(monthStart)!;
-      const currentSpend = spend.total ?? 0;
-      const budgetCap = settings.budget.monthlyCap;
-      const cutoff = settings.budget.cutoffThreshold;
+    const webhookUrl = process.env[settings.lark.webhookUrlEnvVar];
+    let budgetAlertSent = false;
 
-      if (currentSpend / budgetCap >= cutoff) {
-        console.log(
-          `[analyze] budget cap reached (${currentSpend.toFixed(4)}/${budgetCap}), skipping remaining items`
+    for (const item of pendingItems) {
+      const budgetStatus = getBudgetStatus(db, settings);
+
+      if (budgetStatus.action === "pause") {
+        console.warn(
+          `[analyze] budget cap reached (${budgetStatus.estimatedCostUSD.toFixed(4)}/${budgetStatus.budgetCapUSD}), skipping remaining items`
         );
+        if (webhookUrl && !budgetAlertSent) {
+          budgetAlertSent = true;
+          const alertCardJson = buildBudgetAlertCard(budgetStatus);
+          const envelope = JSON.stringify({ msg_type: "interactive", card: JSON.parse(alertCardJson) });
+          try {
+            await sendCard(webhookUrl, envelope);
+          } catch (err) {
+            console.error("[analyze] failed to send budget alert:", err instanceof Error ? err.message : String(err));
+          }
+        }
         break;
+      }
+
+      if (budgetStatus.action === "warning") {
+        console.warn(`[analyze] budget warning: ${(budgetStatus.usagePercent * 100).toFixed(1)}%`);
       }
 
       const input: ReviewInput = {
