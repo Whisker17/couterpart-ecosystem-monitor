@@ -7,6 +7,7 @@ import { reportStage } from "./pipeline/stages/report.js";
 import { dispatchStage } from "./pipeline/stages/dispatch.js";
 import { closeDb } from "./storage/db.js";
 import { isValidDate } from "./utils/validate-date.js";
+import { getSettings } from "./config/settings.js";
 
 const { values } = parseArgs({
   options: {
@@ -39,6 +40,7 @@ try {
   const ctx = await runPipeline(stages, {
     mode,
     reportDate: values.date,
+    timezone: getSettings().schedule.timezone,
   });
 
   const stageOrder = ["collect", "analyze", "report", "dispatch"].filter((n) =>

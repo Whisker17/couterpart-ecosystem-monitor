@@ -9,8 +9,9 @@
     "webhookUrlEnvVar": "LARK_WEBHOOK_URL"
   },
   "schedule": {
-    "dailyCron": "0 8 * * *",
-    "weeklyCron": "0 9 * * 0"
+    "dailyCron": "0 9 * * *",
+    "weeklyCron": "30 9 * * 1",
+    "timezone": "Asia/Shanghai"
   },
   "budget": {
     "monthlyCap": 40,

@@ -9,6 +9,7 @@ import { getSettings } from "../../config/settings.js";
 import { getBudgetStatus } from "../../utils/budget-tracker.js";
 import { WeeklyThemeSchema } from "../../schema/analysis.js";
 import type { WeeklyTheme } from "../../schema/analysis.js";
+import { getYesterdayPeriod, getWeekPeriod } from "../../utils/time-window.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,6 +39,20 @@ const SIGNIFICANCE_ORDER: Record<string, number> = {
   notable: 1,
   routine: 2,
 };
+
+function formatDate(dateStr: string, timezone: string): string {
+  const d = new Date(dateStr + "T00:00:00Z");
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
+function formatShortDate(dateStr: string, timezone: string): string {
+  return formatDate(dateStr, timezone);
+}
 
 // Lark Message Card v2 element types
 interface LarkMarkdownElement {
@@ -467,7 +482,8 @@ export class ReportStage implements PipelineStage {
     const db = getDb();
     const errors: string[] = [];
 
-    const rows = db.query<WeeklyRow, []>(`
+    const { startUnix: weekStartUnix, endUnix: weekEndUnix } = getWeekPeriod(ctx.timezone);
+    const rows = db.query<WeeklyRow, [number, number]>(`
       SELECT
         ci.id            AS item_id,
         ci.competitor_id,
@@ -489,9 +505,9 @@ export class ReportStage implements PipelineStage {
       JOIN competitors c    ON c.id = ci.competitor_id
       JOIN analyses a       ON a.content_item_id = ci.id
       WHERE ci.analysis_status = 'complete'
-        AND a.analyzed_at >= datetime('now', '-7 days')
+        AND CAST(strftime('%s', a.analyzed_at) AS INTEGER) BETWEEN ? AND ?
       ORDER BY c.name ASC
-    `).all();
+    `).all(weekStartUnix, weekEndUnix);
 
     const sorted = [...rows].sort((a, b) => {
       if (a.competitor_org !== b.competitor_org) {
@@ -501,7 +517,8 @@ export class ReportStage implements PipelineStage {
     });
 
     const themes = await extractWeeklyThemes(sorted, this.generateObjectFn);
-    const cards = buildWeeklyLarkCards(sorted, ctx.reportDate, themes);
+    const weeklyDisplayDate = formatDate(ctx.reportDate, ctx.timezone);
+    const cards = buildWeeklyLarkCards(sorted, weeklyDisplayDate, themes);
 
     const reportContent = {
       report_date: ctx.reportDate,
@@ -525,7 +542,8 @@ export class ReportStage implements PipelineStage {
     const reportJson = JSON.stringify(reportContent, null, 2);
     const contentHash = createHash("sha256").update(reportJson).digest("hex");
 
-    const filePath = `data/reports/weekly-${ctx.reportDate}.json`;
+    const weeklyFileDate = formatShortDate(ctx.reportDate, ctx.timezone);
+    const filePath = `data/reports/weekly-${weeklyFileDate}.json`;
     try {
       mkdirSync(dirname(filePath), { recursive: true });
       writeFileSync(filePath, reportJson, "utf-8");
@@ -603,8 +621,9 @@ export class ReportStage implements PipelineStage {
     }
     const isPartial = partialCompetitors.length > 0;
 
-    // Query all unreported completed items
-    const rows = db.query<UnreportedRow, []>(`
+    // Query items analyzed within yesterday's time window in the configured timezone
+    const { startUnix, endUnix } = getYesterdayPeriod(ctx.timezone);
+    const rows = db.query<UnreportedRow, [number, number]>(`
       SELECT
         ci.id            AS item_id,
         ci.competitor_id,
@@ -626,9 +645,9 @@ export class ReportStage implements PipelineStage {
       JOIN competitors c    ON c.id = ci.competitor_id
       JOIN analyses a       ON a.content_item_id = ci.id
       WHERE ci.analysis_status = 'complete'
-        AND ci.reported_at IS NULL
+        AND CAST(strftime('%s', a.analyzed_at) AS INTEGER) BETWEEN ? AND ?
       ORDER BY c.name ASC
-    `).all();
+    `).all(startUnix, endUnix);
 
     // Sort within each competitor group by significance
     const sorted = [...rows].sort((a, b) => {
@@ -638,8 +657,9 @@ export class ReportStage implements PipelineStage {
       return (SIGNIFICANCE_ORDER[a.significance] ?? 99) - (SIGNIFICANCE_ORDER[b.significance] ?? 99);
     });
 
-    // Build Lark cards
-    const cards = buildLarkCards(sorted, ctx.reportDate, isPartial, partialCompetitors);
+    // Build Lark cards using timezone-aware display date
+    const displayDate = formatDate(ctx.reportDate, ctx.timezone);
+    const cards = buildLarkCards(sorted, displayDate, isPartial, partialCompetitors);
 
     // Budget footer on daily report cards
     const settings = getSettings();
@@ -678,7 +698,8 @@ export class ReportStage implements PipelineStage {
     const contentHash = createHash("sha256").update(reportJson).digest("hex");
 
     // Write local JSON file
-    const filePath = `data/reports/daily-${ctx.reportDate}.json`;
+    const fileDate = formatShortDate(ctx.reportDate, ctx.timezone);
+    const filePath = `data/reports/daily-${fileDate}.json`;
     try {
       mkdirSync(dirname(filePath), { recursive: true });
       writeFileSync(filePath, reportJson, "utf-8");

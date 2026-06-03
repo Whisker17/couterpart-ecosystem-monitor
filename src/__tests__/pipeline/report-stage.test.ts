@@ -87,8 +87,8 @@ async function seedCompletedItem(opts: {
 
   db.exec(`
     INSERT OR IGNORE INTO analyses
-      (content_item_id, summary, significance, urgency)
-    VALUES (${item.id}, '${summary.replace(/'/g, "''")}', '${sig}', 'normal')
+      (content_item_id, summary, significance, urgency, analyzed_at)
+    VALUES (${item.id}, '${summary.replace(/'/g, "''")}', '${sig}', 'normal', datetime('now', '-1 day'))
   `);
 
   return { competitorId: comp.id, itemId: item.id };
@@ -346,7 +346,7 @@ describe("ReportStage.execute weekly mode", () => {
       VALUES (${comp.id}, 'blog', 'https://corp-a.com/old', 'Old Post', 'Old', 'complete', datetime('now'))
     `);
     const item = db.query<{ id: number }, []>("SELECT id FROM content_items WHERE source_url = 'https://corp-a.com/old'").get()!;
-    db.exec(`INSERT INTO analyses (content_item_id, summary, significance, urgency) VALUES (${item.id}, 'Summary', 'routine', 'normal')`);
+    db.exec(`INSERT INTO analyses (content_item_id, summary, significance, urgency, analyzed_at) VALUES (${item.id}, 'Summary', 'routine', 'normal', datetime('now', '-1 day'))`);
 
     const stage = new ReportStage(noopGenerateObject as never);
     const result = await stage.execute(makeCTX({ mode: "weekly" }));

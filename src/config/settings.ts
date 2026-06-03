@@ -13,6 +13,7 @@ export interface Settings {
   schedule: {
     dailyCron: string;
     weeklyCron: string;
+    timezone: string;
   };
   budget: {
     monthlyCap: number;
