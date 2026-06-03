@@ -178,6 +178,34 @@ describe("AnalyzeStage: retry_count logic", () => {
 });
 
 // ---------------------------------------------------------------------------
+describe("AnalyzeStage: total provider calls bounded at 3 (no SDK internal retry stacking)", () => {
+  test("persistent 429 results in exactly 3 provider calls, not 9 (maxRetries:0 prevents SDK stacking)", async () => {
+    await seedPendingItem();
+    let calls = 0;
+    // Each invocation of this fn is one provider call.
+    // Without maxRetries:0, the SDK would internally retry 2× per outer call,
+    // turning withRetry's 3 attempts into 9 provider calls.
+    const stage = new AnalyzeStage(
+      async () => { calls++; throw makeApiError(429); },
+      noop
+    );
+    await stage.execute(CTX);
+    expect(calls).toBe(3);
+  });
+
+  test("persistent 500 results in exactly 3 provider calls, not 9", async () => {
+    await seedPendingItem();
+    let calls = 0;
+    const stage = new AnalyzeStage(
+      async () => { calls++; throw makeApiError(500); },
+      noop
+    );
+    await stage.execute(CTX);
+    expect(calls).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe("AnalyzeStage: 429 rate-limit → exponential backoff within run", () => {
   test("retries 429 up to 2 times then marks failed", async () => {
     await seedPendingItem();

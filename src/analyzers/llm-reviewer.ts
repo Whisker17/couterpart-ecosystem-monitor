@@ -74,6 +74,7 @@ export type GenerateObjectFn = (options: {
   prompt: string;
   maxOutputTokens?: number;
   abortSignal?: AbortSignal;
+  maxRetries?: number;
 }) => Promise<{ object: ContentAnalysis; usage: { inputTokens?: number; outputTokens?: number } }>;
 
 export async function reviewContent(
@@ -109,6 +110,7 @@ export async function reviewContent(
     prompt: userPrompt,
     maxOutputTokens: settings.llm.maxTokensPerCall,
     abortSignal: signal,
+    maxRetries: 0,
   });
 
   const inputTokens = usage?.inputTokens ?? 0;
