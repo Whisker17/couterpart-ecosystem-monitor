@@ -142,6 +142,21 @@ function buildCollapsiblePanel(item: UnreportedRow): LarkCollapsiblePanel {
   };
 }
 
+function truncateSummaryToFit(summary: string, budgetBytes: number): string {
+  if (Buffer.byteLength(summary, "utf-8") <= budgetBytes) return summary;
+  let byteCount = 0;
+  let i = 0;
+  while (i < summary.length) {
+    const cp = summary.codePointAt(i)!;
+    const charLen = cp > 0xffff ? 2 : 1;
+    const charBytes = Buffer.byteLength(summary.slice(i, i + charLen), "utf-8");
+    if (byteCount + charBytes > budgetBytes) break;
+    byteCount += charBytes;
+    i += charLen;
+  }
+  return summary.slice(0, i) + "…";
+}
+
 function buildLarkCards(
   items: UnreportedRow[],
   reportDate: string,
@@ -267,16 +282,23 @@ function buildLarkCards(
       // Single-item fallback: emit a minimal plain-text card when even one item exceeds the limit
       if (chunk.length === 1 && Buffer.byteLength(JSON.stringify(card), "utf-8") > CARD_LIMIT) {
         const item = chunk[0]!;
-        cards.push({
+        const buildFallback = (summary: string): LarkCard => ({
           config: { wide_screen_mode: true },
           header: { title: { tag: "plain_text", content: cardTitle } },
           elements: [
             {
               tag: "markdown",
-              content: `**[${item.competitor_name}]** — ${item.summary}\n\n[原文链接](${item.source_url})`,
+              content: `**[${item.competitor_name}]** — ${summary}\n\n[原文链接](${item.source_url})`,
             },
           ],
         });
+        let fallback = buildFallback(item.summary);
+        if (Buffer.byteLength(JSON.stringify(fallback), "utf-8") > CARD_LIMIT) {
+          const overhead = Buffer.byteLength(JSON.stringify(buildFallback("")), "utf-8");
+          const budget = CARD_LIMIT - overhead - 512;
+          fallback = buildFallback(truncateSummaryToFit(item.summary, budget));
+        }
+        cards.push(fallback);
       } else {
         cards.push(card);
       }
@@ -496,16 +518,23 @@ function buildWeeklyLarkCards(
       // Single-item fallback: emit a minimal plain-text card when even one item exceeds the limit
       if (chunk.length === 1 && Buffer.byteLength(JSON.stringify(card), "utf-8") > CARD_LIMIT) {
         const item = chunk[0]!;
-        cards.push({
+        const buildFallback = (summary: string): LarkCard => ({
           config: { wide_screen_mode: true },
           header: { title: { tag: "plain_text", content: cardTitle }, template: "purple" },
           elements: [
             {
               tag: "markdown",
-              content: `**[${item.competitor_name}]** — ${item.summary}\n\n[原文链接](${item.source_url})`,
+              content: `**[${item.competitor_name}]** — ${summary}\n\n[原文链接](${item.source_url})`,
             },
           ],
         });
+        let fallback = buildFallback(item.summary);
+        if (Buffer.byteLength(JSON.stringify(fallback), "utf-8") > CARD_LIMIT) {
+          const overhead = Buffer.byteLength(JSON.stringify(buildFallback("")), "utf-8");
+          const budget = CARD_LIMIT - overhead - 512;
+          fallback = buildFallback(truncateSummaryToFit(item.summary, budget));
+        }
+        cards.push(fallback);
       } else {
         cards.push(card);
       }

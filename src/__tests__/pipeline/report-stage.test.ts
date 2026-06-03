@@ -893,4 +893,55 @@ describe("Lark card Level-3 byte-bounded chunking", () => {
       expect(Array.isArray(card.elements)).toBe(true);
     }
   });
+
+  test("daily: single item with a summary so large the minimal fallback card still exceeds 28KB → summary is truncated to fit", async () => {
+    // "中" = 3 bytes. 12000 chars = 36000 bytes → fallback card ≈ 36KB > 28KB before truncation
+    const hugeSummary = "中".repeat(12000);
+    await seedCompletedItem({
+      org: "corp-a", name: "Corp A", significance: "notable",
+      sourceUrl: "https://corp-a.com/n1", summary: hugeSummary,
+    });
+
+    const stage = new ReportStage();
+    await stage.execute(makeCTX());
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'daily'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ config: unknown; header: unknown; elements: unknown[] }>;
+    };
+
+    expect(report.cards.length).toBeGreaterThanOrEqual(1);
+    for (const card of report.cards) {
+      expect(Buffer.byteLength(JSON.stringify(card), "utf-8")).toBeLessThanOrEqual(28 * 1024);
+    }
+  });
+
+  test("weekly: single item with a summary so large the minimal fallback card still exceeds 28KB → summary is truncated to fit", async () => {
+    const hugeSummary = "中".repeat(12000);
+    await seedCompletedItem({
+      org: "corp-a", name: "Corp A", significance: "notable",
+      sourceUrl: "https://corp-a.com/n1", summary: hugeSummary,
+    });
+
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ config: unknown; header: { template?: string }; elements: unknown[] }>;
+    };
+
+    expect(report.cards.length).toBeGreaterThanOrEqual(1);
+    for (const card of report.cards) {
+      expect(Buffer.byteLength(JSON.stringify(card), "utf-8")).toBeLessThanOrEqual(28 * 1024);
+    }
+  });
 });
