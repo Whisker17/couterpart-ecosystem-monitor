@@ -1,6 +1,8 @@
 import { Cron } from "croner";
 import { runPipeline, type PipelineStage, type PipelineContext } from "../pipeline/runner.js";
 import { getSettings } from "../config/settings.js";
+import { getDb } from "../storage/db.js";
+import { cleanupOldContent, archiveReports, vacuumDb } from "../pipeline/maintenance.js";
 
 export interface Scheduler {
   start(): Scheduler;
@@ -32,6 +34,7 @@ export function createScheduler(
           async () => {
             console.log("[scheduler] daily pipeline triggered");
             await runPipeline(stages, { mode: "daily", timezone });
+            cleanupOldContent(getDb());
           }
         )
       );
@@ -43,6 +46,20 @@ export function createScheduler(
           async () => {
             console.log("[scheduler] weekly pipeline triggered");
             await runPipeline(stages, { mode: "weekly", timezone });
+            cleanupOldContent(getDb());
+          }
+        )
+      );
+
+      jobs.push(
+        new Cron(
+          "0 3 1 * *",
+          { timezone, name: "monthly-maintenance" },
+          async () => {
+            console.log("[scheduler] monthly maintenance triggered");
+            const db = getDb();
+            await archiveReports(db);
+            vacuumDb(db);
           }
         )
       );
