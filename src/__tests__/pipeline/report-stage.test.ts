@@ -601,3 +601,412 @@ describe("ReportStage.execute weekly mode", () => {
     expect(existsSync(`data/reports/daily-${REPORT_DATE}.json`)).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+describe("Lark card size degradation — daily", () => {
+  test("<20KB report → single complete card with all items", async () => {
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "notable", sourceUrl: "https://corp-a.com/n1" });
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "routine", sourceUrl: "https://corp-a.com/r1" });
+
+    const stage = new ReportStage();
+    await stage.execute(makeCTX());
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'daily'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ elements: Array<{ tag: string }> }>;
+    };
+
+    expect(report.cards.length).toBe(1);
+    expect(Buffer.byteLength(JSON.stringify(report.cards[0]), "utf-8")).toBeLessThan(20 * 1024);
+
+    const panels = report.cards[0]!.elements.filter((e) => e.tag === "collapsible_panel");
+    expect(panels.length).toBe(2);
+  });
+
+  test(">20KB full card, <=28KB trimmed → single trimmed card + omission footer", async () => {
+    const longSummary = "x".repeat(1500);
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "notable", sourceUrl: "https://corp-a.com/n1", summary: longSummary });
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "notable", sourceUrl: "https://corp-a.com/n2", summary: longSummary });
+    for (let i = 0; i < 8; i++) {
+      await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "routine", sourceUrl: `https://corp-a.com/r${i}`, summary: longSummary });
+    }
+
+    const stage = new ReportStage();
+    await stage.execute(makeCTX());
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'daily'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ elements: Array<{ tag: string; content?: string }> }>;
+    };
+
+    expect(report.cards.length).toBe(1);
+    const cardBytes = Buffer.byteLength(JSON.stringify(report.cards[0]), "utf-8");
+    expect(cardBytes).toBeGreaterThan(0);
+    expect(cardBytes).toBeLessThanOrEqual(28 * 1024);
+
+    const panels = report.cards[0]!.elements.filter((e) => e.tag === "collapsible_panel");
+    expect(panels.length).toBe(2);
+
+    const allText = report.cards[0]!.elements
+      .filter((e) => e.tag === "markdown")
+      .map((e) => (e as { content?: string }).content ?? "")
+      .join("\n");
+    expect(allText).toContain("已省略");
+    expect(allText).toContain("8");
+  });
+
+  test(">28KB trimmed → multiple cards, one per competitor", async () => {
+    // 5 notable items per competitor (2 competitors) = 10 notable items with 1500-char summaries
+    // Trimmed card ≈ 10 × 3300 + 500 ≈ 33500 bytes > 28KB → Level 3 split
+    const longSummary = "x".repeat(1500);
+    for (let i = 0; i < 5; i++) {
+      await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "notable", sourceUrl: `https://corp-a.com/n${i}`, summary: longSummary });
+    }
+    for (let i = 0; i < 5; i++) {
+      await seedCompletedItem({ org: "corp-b", name: "Corp B", significance: "notable", sourceUrl: `https://corp-b.com/n${i}`, summary: longSummary });
+    }
+
+    const stage = new ReportStage();
+    await stage.execute(makeCTX());
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'daily'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ config: unknown; header: unknown; elements: unknown[] }>;
+    };
+
+    expect(report.cards.length).toBe(2);
+    for (const card of report.cards) {
+      expect(card.config).toBeDefined();
+      expect(card.header).toBeDefined();
+      expect(Array.isArray(card.elements)).toBe(true);
+    }
+  });
+
+  test("byte-accurate measurement: Chinese text exceeding 20KB by bytes but not chars triggers trim", async () => {
+    // "中" = 1 char (old .length) but 3 bytes (Buffer.byteLength).
+    // 3500 Chinese chars: .length contribution ≈ 7400 chars/card << 20×1024 chars
+    //                     Buffer.byteLength ≈ 21400 bytes/card > 20×1024 bytes
+    // Old code (.length check) returns complete card (2 panels).
+    // New code (Buffer.byteLength check) takes trim path (1 notable panel + footer).
+    const chineseSummary = "中".repeat(3500);
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "notable", sourceUrl: "https://corp-a.com/n1", summary: chineseSummary });
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "routine", sourceUrl: "https://corp-a.com/r1", summary: chineseSummary });
+
+    const stage = new ReportStage();
+    await stage.execute(makeCTX());
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'daily'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ elements: Array<{ tag: string; content?: string }> }>;
+    };
+
+    // Byte-accurate: card > 20KB bytes → trim path taken → routine panel removed
+    expect(report.cards.length).toBe(1);
+    const panels = report.cards[0]!.elements.filter((e) => e.tag === "collapsible_panel");
+    expect(panels.length).toBe(1);
+
+    const allText = report.cards[0]!.elements
+      .filter((e) => e.tag === "markdown")
+      .map((e) => (e as { content?: string }).content ?? "")
+      .join("\n");
+    expect(allText).toContain("已省略");
+
+    const trimmedBytes = Buffer.byteLength(JSON.stringify(report.cards[0]), "utf-8");
+    expect(trimmedBytes).toBeLessThanOrEqual(28 * 1024);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("Lark card size degradation — weekly", () => {
+  test("<20KB weekly report → single complete card with all items", async () => {
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "notable", sourceUrl: "https://corp-a.com/n1" });
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "routine", sourceUrl: "https://corp-a.com/r1" });
+
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ elements: Array<{ tag: string }> }>;
+    };
+
+    expect(report.cards.length).toBe(1);
+    expect(Buffer.byteLength(JSON.stringify(report.cards[0]), "utf-8")).toBeLessThan(20 * 1024);
+
+    const panels = report.cards[0]!.elements.filter((e) => e.tag === "collapsible_panel");
+    expect(panels.length).toBe(2);
+  });
+
+  test(">20KB weekly full card, <=28KB trimmed → single trimmed card + omission footer", async () => {
+    const longSummary = "x".repeat(1500);
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "notable", sourceUrl: "https://corp-a.com/n1", summary: longSummary });
+    await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "notable", sourceUrl: "https://corp-a.com/n2", summary: longSummary });
+    // Weekly cards have less structural overhead than daily — need 15+ routine items to exceed 20KB
+    for (let i = 0; i < 15; i++) {
+      await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "routine", sourceUrl: `https://corp-a.com/r${i}`, summary: longSummary });
+    }
+
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ elements: Array<{ tag: string; content?: string }> }>;
+    };
+
+    expect(report.cards.length).toBe(1);
+    const cardBytes = Buffer.byteLength(JSON.stringify(report.cards[0]), "utf-8");
+    expect(cardBytes).toBeLessThanOrEqual(28 * 1024);
+
+    const panels = report.cards[0]!.elements.filter((e) => e.tag === "collapsible_panel");
+    expect(panels.length).toBe(2);
+
+    const allText = report.cards[0]!.elements
+      .filter((e) => e.tag === "markdown")
+      .map((e) => (e as { content?: string }).content ?? "")
+      .join("\n");
+    expect(allText).toContain("已省略");
+    expect(allText).toContain("15");
+  });
+
+  test(">28KB weekly trimmed → multiple cards, one per competitor", async () => {
+    const longSummary = "x".repeat(1500);
+    // Weekly trimmed card needs 17+ items with 1500-char summaries to exceed 28KB
+    for (let i = 0; i < 9; i++) {
+      await seedCompletedItem({ org: "corp-a", name: "Corp A", significance: "notable", sourceUrl: `https://corp-a.com/n${i}`, summary: longSummary });
+    }
+    for (let i = 0; i < 9; i++) {
+      await seedCompletedItem({ org: "corp-b", name: "Corp B", significance: "notable", sourceUrl: `https://corp-b.com/n${i}`, summary: longSummary });
+    }
+
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ config: unknown; header: { template?: string }; elements: unknown[] }>;
+    };
+
+    expect(report.cards.length).toBe(2);
+    for (const card of report.cards) {
+      expect(card.config).toBeDefined();
+      expect(card.header).toBeDefined();
+      expect(Array.isArray(card.elements)).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("Lark card Level-3 byte-bounded chunking", () => {
+  test("daily: single competitor with enough notables to exceed 28KB per card → chunked into multiple byte-bounded cards", async () => {
+    const longSummary = "x".repeat(1500);
+    // 10 notable items from 1 competitor: per-competitor card ≈ 33KB > 28KB → chunking required
+    for (let i = 0; i < 10; i++) {
+      await seedCompletedItem({
+        org: "corp-a", name: "Corp A", significance: "notable",
+        sourceUrl: `https://corp-a.com/n${i}`, summary: longSummary,
+      });
+    }
+
+    const stage = new ReportStage();
+    await stage.execute(makeCTX());
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'daily'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ config: unknown; header: unknown; elements: unknown[] }>;
+    };
+
+    // Chunking must produce multiple cards
+    expect(report.cards.length).toBeGreaterThan(1);
+
+    // Every emitted card must be within the 28KB byte limit
+    for (const card of report.cards) {
+      const cardBytes = Buffer.byteLength(JSON.stringify(card), "utf-8");
+      expect(cardBytes).toBeLessThanOrEqual(28 * 1024);
+      expect(card.config).toBeDefined();
+      expect(card.header).toBeDefined();
+      expect(Array.isArray(card.elements)).toBe(true);
+    }
+  });
+
+  test("weekly: single competitor with enough notables to exceed 28KB per card → chunked into multiple byte-bounded cards", async () => {
+    const longSummary = "x".repeat(1500);
+    // 20 notable items from 1 competitor: per-competitor weekly card ≈ 34KB > 28KB → chunking required
+    for (let i = 0; i < 20; i++) {
+      await seedCompletedItem({
+        org: "corp-a", name: "Corp A", significance: "notable",
+        sourceUrl: `https://corp-a.com/n${i}`, summary: longSummary,
+      });
+    }
+
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ config: unknown; header: { template?: string }; elements: unknown[] }>;
+    };
+
+    expect(report.cards.length).toBeGreaterThan(1);
+
+    for (const card of report.cards) {
+      const cardBytes = Buffer.byteLength(JSON.stringify(card), "utf-8");
+      expect(cardBytes).toBeLessThanOrEqual(28 * 1024);
+      expect(card.config).toBeDefined();
+      expect(card.header).toBeDefined();
+      expect(Array.isArray(card.elements)).toBe(true);
+    }
+  });
+
+  test("daily: single item with a summary so large the minimal fallback card still exceeds 28KB → summary is truncated to fit", async () => {
+    // "中" = 3 bytes. 12000 chars = 36000 bytes → fallback card ≈ 36KB > 28KB before truncation
+    const hugeSummary = "中".repeat(12000);
+    await seedCompletedItem({
+      org: "corp-a", name: "Corp A", significance: "notable",
+      sourceUrl: "https://corp-a.com/n1", summary: hugeSummary,
+    });
+
+    const stage = new ReportStage();
+    await stage.execute(makeCTX());
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'daily'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ config: unknown; header: unknown; elements: unknown[] }>;
+    };
+
+    expect(report.cards.length).toBeGreaterThanOrEqual(1);
+    for (const card of report.cards) {
+      expect(Buffer.byteLength(JSON.stringify(card), "utf-8")).toBeLessThanOrEqual(28 * 1024);
+    }
+  });
+
+  test("weekly: single item with a summary so large the minimal fallback card still exceeds 28KB → summary is truncated to fit", async () => {
+    const hugeSummary = "中".repeat(12000);
+    await seedCompletedItem({
+      org: "corp-a", name: "Corp A", significance: "notable",
+      sourceUrl: "https://corp-a.com/n1", summary: hugeSummary,
+    });
+
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ config: unknown; header: { template?: string }; elements: unknown[] }>;
+    };
+
+    expect(report.cards.length).toBeGreaterThanOrEqual(1);
+    for (const card of report.cards) {
+      expect(Buffer.byteLength(JSON.stringify(card), "utf-8")).toBeLessThanOrEqual(28 * 1024);
+    }
+  });
+
+  test("daily: summary of JSON-escaped chars (quotes) — fallback card must still be ≤ 28KB and contain the truncated summary", async () => {
+    // '"' serializes as '\"' in JSON, doubling the byte cost — raw budget calc underestimates
+    const hugeSummary = '"'.repeat(30000);
+    await seedCompletedItem({
+      org: "corp-a", name: "Corp A", significance: "notable",
+      sourceUrl: "https://corp-a.com/q1", summary: hugeSummary,
+    });
+
+    const stage = new ReportStage();
+    await stage.execute(makeCTX());
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'daily'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ config: unknown; header: unknown; elements: Array<{ content?: string }> }>;
+    };
+
+    expect(report.cards.length).toBeGreaterThanOrEqual(1);
+    for (const card of report.cards) {
+      expect(Buffer.byteLength(JSON.stringify(card), "utf-8")).toBeLessThanOrEqual(28 * 1024);
+    }
+    // The fallback card's markdown element should start with '"' (truncation happened, not empty fallback)
+    const lastCard = report.cards[report.cards.length - 1]!;
+    const mdEl = (lastCard as { elements: Array<{ content?: string }> }).elements.find(
+      (e) => typeof e.content === "string" && e.content.includes('"')
+    );
+    expect(mdEl).toBeDefined();
+  });
+
+  test("weekly: summary of JSON-escaped chars (newlines) — fallback card must still be ≤ 28KB and contain the truncated summary", async () => {
+    // '\n' serializes as '\n' (2 chars) in JSON — raw byte count equals serialized but
+    // the total card JSON is still larger than a naive overhead calculation predicts.
+    const hugeSummary = '\n'.repeat(30000);
+    await seedCompletedItem({
+      org: "corp-a", name: "Corp A", significance: "notable",
+      sourceUrl: "https://corp-a.com/n2", summary: hugeSummary,
+    });
+
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ config: unknown; header: { template?: string }; elements: Array<{ content?: string }> }>;
+    };
+
+    expect(report.cards.length).toBeGreaterThanOrEqual(1);
+    for (const card of report.cards) {
+      expect(Buffer.byteLength(JSON.stringify(card), "utf-8")).toBeLessThanOrEqual(28 * 1024);
+    }
+    // The fallback card should contain a newline in its markdown content (truncation happened, not empty)
+    const lastCard = report.cards[report.cards.length - 1]!;
+    const mdEl = (lastCard as { elements: Array<{ content?: string }> }).elements.find(
+      (e) => typeof e.content === "string" && e.content.includes("\n")
+    );
+    expect(mdEl).toBeDefined();
+  });
+});

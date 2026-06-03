@@ -170,6 +170,30 @@ function buildCollapsiblePanel(item: UnreportedRow): LarkCollapsiblePanel {
   };
 }
 
+function truncateSummaryForFallback(
+  buildFallback: (summary: string) => LarkCard,
+  rawSummary: string,
+  limitBytes: number
+): string {
+  if (Buffer.byteLength(JSON.stringify(buildFallback(rawSummary)), "utf-8") <= limitBytes) {
+    return rawSummary;
+  }
+  const codePoints = [...rawSummary];
+  let lo = 0;
+  let hi = codePoints.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    const candidate = codePoints.slice(0, mid).join("") + "…";
+    if (Buffer.byteLength(JSON.stringify(buildFallback(candidate)), "utf-8") <= limitBytes) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (lo === 0) return "…";
+  return codePoints.slice(0, lo).join("") + "…";
+}
+
 function buildLarkCards(
   items: UnreportedRow[],
   reportDate: string,
@@ -252,7 +276,7 @@ function buildLarkCards(
   const singleCard = buildCard(items, baseTitle);
   const singleCardJson = JSON.stringify(singleCard);
 
-  if (singleCardJson.length <= 20 * 1024) {
+  if (Buffer.byteLength(singleCardJson, "utf-8") <= 20 * 1024) {
     return [singleCard];
   }
 
@@ -268,18 +292,52 @@ function buildLarkCards(
   }
 
   const trimmedJson = JSON.stringify(trimmedCard);
-  if (trimmedJson.length <= 30 * 1024) {
+  if (Buffer.byteLength(trimmedJson, "utf-8") <= 28 * 1024) {
     return [trimmedCard];
   }
 
-  // Still over 30KB: split one card per competitor
+  // Still over 28KB: byte-bounded split, chunked per competitor
   const cards: LarkCard[] = [];
-  let cardIndex = 0;
-  for (const [org, compItems] of grouped) {
+  const CARD_LIMIT = 28 * 1024;
+
+  for (const [_org, compItems] of grouped) {
     const competitorName = compItems[0]!.competitor_name;
-    const cardTitle = `${competitorName} — ${baseTitle} (${cardIndex + 1}/${grouped.size})`;
-    cards.push(buildCard(compItems, cardTitle));
-    cardIndex++;
+    let remaining = [...compItems];
+    let partNum = 1;
+
+    while (remaining.length > 0) {
+      const cardTitle = `${competitorName} — ${baseTitle} (part ${partNum})`;
+      let chunk = remaining;
+      let card = buildCard(chunk, cardTitle);
+
+      // Halve the chunk until it fits within the byte limit
+      while (chunk.length > 1 && Buffer.byteLength(JSON.stringify(card), "utf-8") > CARD_LIMIT) {
+        chunk = chunk.slice(0, Math.ceil(chunk.length / 2));
+        card = buildCard(chunk, cardTitle);
+      }
+
+      // Single-item fallback: emit a minimal plain-text card when even one item exceeds the limit
+      if (chunk.length === 1 && Buffer.byteLength(JSON.stringify(card), "utf-8") > CARD_LIMIT) {
+        const item = chunk[0]!;
+        const buildFallback = (summary: string): LarkCard => ({
+          config: { wide_screen_mode: true },
+          header: { title: { tag: "plain_text", content: cardTitle } },
+          elements: [
+            {
+              tag: "markdown",
+              content: `**[${item.competitor_name}]** — ${summary}\n\n[原文链接](${item.source_url})`,
+            },
+          ],
+        });
+        const truncatedSummary = truncateSummaryForFallback(buildFallback, item.summary, CARD_LIMIT);
+        cards.push(buildFallback(truncatedSummary));
+      } else {
+        cards.push(card);
+      }
+
+      remaining = remaining.slice(chunk.length);
+      partNum++;
+    }
   }
   return cards;
 }
@@ -450,7 +508,7 @@ function buildWeeklyLarkCards(
   const singleCard = buildCard(items, baseTitle);
   const singleJson = JSON.stringify(singleCard);
 
-  if (singleJson.length <= 20 * 1024) {
+  if (Buffer.byteLength(singleJson, "utf-8") <= 20 * 1024) {
     return [singleCard];
   }
 
@@ -464,17 +522,53 @@ function buildWeeklyLarkCards(
     });
   }
 
-  if (JSON.stringify(trimmedCard).length <= 30 * 1024) {
+  const trimmedCardJson = JSON.stringify(trimmedCard);
+  if (Buffer.byteLength(trimmedCardJson, "utf-8") <= 28 * 1024) {
     return [trimmedCard];
   }
 
+  // Byte-bounded split, chunked per competitor
   const cards: LarkCard[] = [];
-  let cardIndex = 0;
-  for (const [org, compItems] of grouped) {
+  const CARD_LIMIT = 28 * 1024;
+
+  for (const [_org, compItems] of grouped) {
     const competitorName = compItems[0]!.competitor_name;
-    const cardTitle = `${competitorName} — ${baseTitle} (${cardIndex + 1}/${grouped.size})`;
-    cards.push(buildCard(compItems, cardTitle));
-    cardIndex++;
+    let remaining = [...compItems];
+    let partNum = 1;
+
+    while (remaining.length > 0) {
+      const cardTitle = `${competitorName} — ${baseTitle} (part ${partNum})`;
+      let chunk = remaining;
+      let card = buildCard(chunk, cardTitle);
+
+      // Halve the chunk until it fits within the byte limit
+      while (chunk.length > 1 && Buffer.byteLength(JSON.stringify(card), "utf-8") > CARD_LIMIT) {
+        chunk = chunk.slice(0, Math.ceil(chunk.length / 2));
+        card = buildCard(chunk, cardTitle);
+      }
+
+      // Single-item fallback: emit a minimal plain-text card when even one item exceeds the limit
+      if (chunk.length === 1 && Buffer.byteLength(JSON.stringify(card), "utf-8") > CARD_LIMIT) {
+        const item = chunk[0]!;
+        const buildFallback = (summary: string): LarkCard => ({
+          config: { wide_screen_mode: true },
+          header: { title: { tag: "plain_text", content: cardTitle }, template: "purple" },
+          elements: [
+            {
+              tag: "markdown",
+              content: `**[${item.competitor_name}]** — ${summary}\n\n[原文链接](${item.source_url})`,
+            },
+          ],
+        });
+        const truncatedSummary = truncateSummaryForFallback(buildFallback, item.summary, CARD_LIMIT);
+        cards.push(buildFallback(truncatedSummary));
+      } else {
+        cards.push(card);
+      }
+
+      remaining = remaining.slice(chunk.length);
+      partNum++;
+    }
   }
   return cards;
 }
