@@ -198,6 +198,7 @@ export async function collectFromRss(
       publishedAt: getPublishedAt(item),
       inputQuality,
     });
+    existingUrls.add(normalizedUrl); // prevent within-feed URL duplicates
   }
 
   return results;

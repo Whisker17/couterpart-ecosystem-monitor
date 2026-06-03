@@ -341,3 +341,50 @@ describe("AnalyzeStage: timeout → mark failed, retry next run", () => {
     expect(item.analysis_status).toBe("pending");
   });
 });
+
+// ---------------------------------------------------------------------------
+describe("AnalyzeStage: truncated/metadata_only content path", () => {
+  test("analyzes item with input_quality=metadata_only (content is null)", async () => {
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    db.exec(`INSERT INTO competitors (name, org) VALUES ('Test', 'test-org')`);
+    db.exec(`
+      INSERT INTO content_items
+        (competitor_id, source, source_url, title, content, input_quality, analysis_status, retry_count)
+      VALUES (1, 'blog', 'https://example.com/meta-post', 'Meta Title', NULL, 'metadata_only', 'pending', 0)
+    `);
+
+    const stage = new AnalyzeStage(makeSuccessReviewFn(), noop);
+    const result = await stage.execute(CTX);
+
+    expect(result.success).toBe(true);
+    expect(result.itemsProcessed).toBe(1);
+
+    const item = db.query<{ analysis_status: string; }, []>(
+      "SELECT analysis_status FROM content_items WHERE id=1"
+    ).get()!;
+    expect(item.analysis_status).toBe("complete");
+  });
+
+  test("analyzes item with input_quality=truncated and short content", async () => {
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    db.exec(`INSERT INTO competitors (name, org) VALUES ('Test', 'test-org')`);
+    db.exec(`
+      INSERT INTO content_items
+        (competitor_id, source, source_url, title, content, input_quality, analysis_status, retry_count)
+      VALUES (1, 'blog', 'https://example.com/truncated-post', 'Trunc Title', 'Short snippet', 'truncated', 'pending', 0)
+    `);
+
+    const stage = new AnalyzeStage(makeSuccessReviewFn(), noop);
+    const result = await stage.execute(CTX);
+
+    expect(result.success).toBe(true);
+    expect(result.itemsProcessed).toBe(1);
+
+    const row = db.query<{ analysis_status: string; }, []>(
+      "SELECT analysis_status FROM content_items WHERE id=1"
+    ).get()!;
+    expect(row.analysis_status).toBe("complete");
+  });
+});

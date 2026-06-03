@@ -148,3 +148,55 @@ test("DDL is idempotent — second getDb() call does not re-run DDL", async () =
   // If DDL re-ran it would fail (tables already exist without IF NOT EXISTS... but we use IF NOT EXISTS so should be fine)
   expect(() => getDb()).not.toThrow();
 });
+
+test("schema migration: existing DB with user_version=0 gets migrated without data loss", async () => {
+  // Simulate an old DB with user_version=0 that has the competitors table
+  // but only the minimal columns (id, name, org) — missing blog_rss_url,
+  // x_handle, website_url, tags, last_synced_at, created_at.
+  const { Database } = await import("bun:sqlite");
+  const oldDb = new Database(TEST_DB_PATH, { create: true });
+  oldDb.exec("CREATE TABLE IF NOT EXISTS competitors (id INTEGER PRIMARY KEY, name TEXT NOT NULL, org TEXT NOT NULL)");
+  oldDb.exec("INSERT INTO competitors (name, org) VALUES ('OldCorp', 'old-corp')");
+  // user_version stays 0 (default — no PRAGMA user_version set)
+  oldDb.close();
+
+  // getDb() should detect user_version=0, run DDL + ALTER TABLE migrations,
+  // then bump user_version to 1.
+  const { getDb } = await import("../../storage/db.js");
+  const db = getDb();
+
+  // Existing row must still be there (no data loss)
+  const comp = db.query<{ name: string }, []>(
+    "SELECT name FROM competitors WHERE org = 'old-corp'"
+  ).get();
+  expect(comp?.name).toBe("OldCorp");
+
+  // All required tables must now exist
+  const tables = db
+    .query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    )
+    .all()
+    .map((r) => r.name);
+  expect(tables).toContain("content_items");
+  expect(tables).toContain("analyses");
+  expect(tables).toContain("analysis_inputs");
+  expect(tables).toContain("reports");
+  expect(tables).toContain("report_deliveries");
+
+  // All required competitors columns must exist after migration (ALTER TABLE path)
+  const cols = db
+    .query<{ name: string }, []>("PRAGMA table_info(competitors)")
+    .all()
+    .map((r) => r.name);
+  expect(cols).toContain("blog_rss_url");
+  expect(cols).toContain("x_handle");
+  expect(cols).toContain("website_url");
+  expect(cols).toContain("tags");
+  expect(cols).toContain("last_synced_at");
+  expect(cols).toContain("created_at");
+
+  // user_version must be bumped to 1
+  const { user_version } = db.query<{ user_version: number }, []>("PRAGMA user_version").get()!;
+  expect(user_version).toBe(1);
+});

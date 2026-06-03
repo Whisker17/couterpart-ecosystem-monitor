@@ -179,4 +179,29 @@ describe("collectFromRss", () => {
     expect(result[0]!.inputQuality).toBe("truncated");
     expect(result[0]!.content).toBe("Short");
   }, 20_000);
+
+  test("sets inputQuality=truncated when extractor returns null content (truncated fallback)", async () => {
+    // Extractor returns null (not throws) — this is the fallback path when extraction yields no content
+    const nullContentExtractor: ExtractorFn = async () => null;
+
+    const result = await collectFromRss(COMPETITOR, undefined, {
+      parser: makeParser([makeFeedItem({ content: "Short" })]),
+      extractor: nullContentExtractor,
+    });
+    expect(result[0]!.inputQuality).toBe("truncated");
+    expect(result[0]!.content).toBe("Short");
+  });
+
+  test("deduplicates URLs within a single feed (within-feed URL dedup)", async () => {
+    // Two items with the same URL in one feed — only one should be collected
+    const result = await collectFromRss(COMPETITOR, undefined, {
+      parser: makeParser([
+        makeFeedItem({ content: "A".repeat(600) }),
+        makeFeedItem({ content: "B".repeat(600) }), // same link as first item
+      ]),
+      extractor: noopExtractor,
+    });
+    expect(result.length).toBe(1);
+    expect(result[0]!.sourceUrl).toBe("https://example.com/post-1");
+  });
 });
