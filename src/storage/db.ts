@@ -9,6 +9,34 @@ const CURRENT_VERSION = 1;
 
 let instance: Database | null = null;
 
+// Adds columns to existing tables that were introduced after the initial schema.
+// ALTER TABLE ADD COLUMN is always safe: it sets all existing rows to NULL (or
+// the column default), and CREATE TABLE IF NOT EXISTS leaves existing tables
+// untouched — so we must handle new columns explicitly.
+function migrateV0toV1(db: Database): void {
+  const existingCols = new Set(
+    db
+      .query<{ name: string }, []>("PRAGMA table_info(competitors)")
+      .all()
+      .map((r) => r.name)
+  );
+
+  const competitorMigrations: Array<{ name: string; sql: string }> = [
+    { name: "blog_rss_url", sql: "ALTER TABLE competitors ADD COLUMN blog_rss_url TEXT" },
+    { name: "x_handle", sql: "ALTER TABLE competitors ADD COLUMN x_handle TEXT" },
+    { name: "website_url", sql: "ALTER TABLE competitors ADD COLUMN website_url TEXT" },
+    { name: "tags", sql: "ALTER TABLE competitors ADD COLUMN tags TEXT" },
+    { name: "last_synced_at", sql: "ALTER TABLE competitors ADD COLUMN last_synced_at TEXT" },
+    { name: "created_at", sql: "ALTER TABLE competitors ADD COLUMN created_at TEXT" },
+  ];
+
+  for (const col of competitorMigrations) {
+    if (!existingCols.has(col.name)) {
+      db.exec(col.sql);
+    }
+  }
+}
+
 // WAL mode change requires an exclusive lock; bun:sqlite's busy_timeout does
 // not always suppress SQLITE_BUSY for PRAGMA journal_mode=WAL when concurrent
 // processes race on a fresh database. We handle it two ways:
@@ -68,6 +96,7 @@ function initDb(): Database {
 
   if (user_version < CURRENT_VERSION) {
     db.exec(DDL);
+    migrateV0toV1(db);
     db.exec(`PRAGMA user_version = ${CURRENT_VERSION}`);
   }
 

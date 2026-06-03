@@ -9,7 +9,16 @@ import type { CompetitorConfig } from "../../config/competitors.js";
 import type { CollectedItem } from "../../collectors/blog-rss.js";
 
 const TEST_DB_PATH = "data/test-pipeline-integration.db";
-const REPORT_DATE = "2026-06-03";
+
+// ReportStage queries items from "yesterday" relative to reportDate (via getYesterdayPeriod).
+// Items analyzed by AnalyzeStage in this run have analyzed_at = datetime('now') = today.
+// Using tomorrow as reportDate means "yesterday" = today, so the items fall inside the window.
+function tomorrowUTC(): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+const REPORT_DATE = tomorrowUTC();
 
 const noop = async (_ms: number) => {};
 
@@ -125,6 +134,9 @@ describe("Pipeline integration: full pipeline", () => {
         throw new Error(`Stage ${name} had errors: ${result.errors.join(", ")}`);
       }
     }
+
+    // Report stage must include at least one item (verifies date window alignment)
+    expect(ctx.stageResults.get("report")?.itemsProcessed).toBeGreaterThan(0);
 
     // Webhook must have been called
     expect(webhookCalled).toBe(true);
