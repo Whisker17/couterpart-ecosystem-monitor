@@ -6,6 +6,7 @@ import { analyzeStage } from "./pipeline/stages/analyze.js";
 import { reportStage } from "./pipeline/stages/report.js";
 import { dispatchStage } from "./pipeline/stages/dispatch.js";
 import { closeDb } from "./storage/db.js";
+import { isValidDate } from "./utils/validate-date.js";
 
 const { values } = parseArgs({
   options: {
@@ -14,6 +15,11 @@ const { values } = parseArgs({
     date: { type: "string" },
   },
 });
+
+if (values.date !== undefined && !isValidDate(values.date)) {
+  console.error("Error: --date must be a valid calendar date in YYYY-MM-DD format");
+  process.exit(1);
+}
 
 const mode = values.mode;
 if (mode !== "daily" && mode !== "weekly") {
