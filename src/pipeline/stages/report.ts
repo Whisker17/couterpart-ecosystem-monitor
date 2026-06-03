@@ -6,6 +6,7 @@ import { dirname } from "path";
 import type { PipelineStage, PipelineContext, StageResult } from "../runner.js";
 import { getDb } from "../../storage/db.js";
 import { getSettings } from "../../config/settings.js";
+import { getBudgetStatus } from "../../utils/budget-tracker.js";
 import { WeeklyThemeSchema } from "../../schema/analysis.js";
 import type { WeeklyTheme } from "../../schema/analysis.js";
 
@@ -639,6 +640,18 @@ export class ReportStage implements PipelineStage {
 
     // Build Lark cards
     const cards = buildLarkCards(sorted, ctx.reportDate, isPartial, partialCompetitors);
+
+    // Budget footer on daily report cards
+    const settings = getSettings();
+    const budgetStatus = getBudgetStatus(db, settings);
+    if (budgetStatus.usagePercent >= 0.60) {
+      const percent = Math.round(budgetStatus.usagePercent * 100);
+      const prefix = budgetStatus.usagePercent >= 0.80 ? "⚠️ " : "💰 ";
+      const footerContent = `${prefix}本月 LLM 预算：已用 $${budgetStatus.estimatedCostUSD.toFixed(4)} / $${budgetStatus.budgetCapUSD.toFixed(2)}（${percent}%）`;
+      for (const card of cards) {
+        card.elements.push({ tag: "markdown", content: footerContent });
+      }
+    }
 
     // Build report content JSON
     const reportContent: ReportContent = {
