@@ -111,6 +111,7 @@ export class AnalyzeStage implements PipelineStage {
 
     const webhookUrl = process.env[settings.lark.webhookUrlEnvVar];
     let budgetAlertSent = false;
+    let warningLogged = false;
 
     for (const item of pendingItems) {
       const budgetStatus = getBudgetStatus(db, settings);
@@ -132,8 +133,9 @@ export class AnalyzeStage implements PipelineStage {
         break;
       }
 
-      if (budgetStatus.action === "warning") {
+      if (budgetStatus.action === "warning" && !warningLogged) {
         console.warn(`[analyze] budget warning: ${(budgetStatus.usagePercent * 100).toFixed(1)}%`);
+        warningLogged = true;
       }
 
       const input: ReviewInput = {
