@@ -823,3 +823,74 @@ describe("Lark card size degradation — weekly", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+describe("Lark card Level-3 byte-bounded chunking", () => {
+  test("daily: single competitor with enough notables to exceed 28KB per card → chunked into multiple byte-bounded cards", async () => {
+    const longSummary = "x".repeat(1500);
+    // 10 notable items from 1 competitor: per-competitor card ≈ 33KB > 28KB → chunking required
+    for (let i = 0; i < 10; i++) {
+      await seedCompletedItem({
+        org: "corp-a", name: "Corp A", significance: "notable",
+        sourceUrl: `https://corp-a.com/n${i}`, summary: longSummary,
+      });
+    }
+
+    const stage = new ReportStage();
+    await stage.execute(makeCTX());
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'daily'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ config: unknown; header: unknown; elements: unknown[] }>;
+    };
+
+    // Chunking must produce multiple cards
+    expect(report.cards.length).toBeGreaterThan(1);
+
+    // Every emitted card must be within the 28KB byte limit
+    for (const card of report.cards) {
+      const cardBytes = Buffer.byteLength(JSON.stringify(card), "utf-8");
+      expect(cardBytes).toBeLessThanOrEqual(28 * 1024);
+      expect(card.config).toBeDefined();
+      expect(card.header).toBeDefined();
+      expect(Array.isArray(card.elements)).toBe(true);
+    }
+  });
+
+  test("weekly: single competitor with enough notables to exceed 28KB per card → chunked into multiple byte-bounded cards", async () => {
+    const longSummary = "x".repeat(1500);
+    // 20 notable items from 1 competitor: per-competitor weekly card ≈ 34KB > 28KB → chunking required
+    for (let i = 0; i < 20; i++) {
+      await seedCompletedItem({
+        org: "corp-a", name: "Corp A", significance: "notable",
+        sourceUrl: `https://corp-a.com/n${i}`, summary: longSummary,
+      });
+    }
+
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ config: unknown; header: { template?: string }; elements: unknown[] }>;
+    };
+
+    expect(report.cards.length).toBeGreaterThan(1);
+
+    for (const card of report.cards) {
+      const cardBytes = Buffer.byteLength(JSON.stringify(card), "utf-8");
+      expect(cardBytes).toBeLessThanOrEqual(28 * 1024);
+      expect(card.config).toBeDefined();
+      expect(card.header).toBeDefined();
+      expect(Array.isArray(card.elements)).toBe(true);
+    }
+  });
+});

@@ -244,14 +244,46 @@ function buildLarkCards(
     return [trimmedCard];
   }
 
-  // Still over 30KB: split one card per competitor
+  // Still over 28KB: byte-bounded split, chunked per competitor
   const cards: LarkCard[] = [];
-  let cardIndex = 0;
-  for (const [org, compItems] of grouped) {
+  const CARD_LIMIT = 28 * 1024;
+
+  for (const [_org, compItems] of grouped) {
     const competitorName = compItems[0]!.competitor_name;
-    const cardTitle = `${competitorName} — ${baseTitle} (${cardIndex + 1}/${grouped.size})`;
-    cards.push(buildCard(compItems, cardTitle));
-    cardIndex++;
+    let remaining = [...compItems];
+    let partNum = 1;
+
+    while (remaining.length > 0) {
+      const cardTitle = `${competitorName} — ${baseTitle} (part ${partNum})`;
+      let chunk = remaining;
+      let card = buildCard(chunk, cardTitle);
+
+      // Halve the chunk until it fits within the byte limit
+      while (chunk.length > 1 && Buffer.byteLength(JSON.stringify(card), "utf-8") > CARD_LIMIT) {
+        chunk = chunk.slice(0, Math.ceil(chunk.length / 2));
+        card = buildCard(chunk, cardTitle);
+      }
+
+      // Single-item fallback: emit a minimal plain-text card when even one item exceeds the limit
+      if (chunk.length === 1 && Buffer.byteLength(JSON.stringify(card), "utf-8") > CARD_LIMIT) {
+        const item = chunk[0]!;
+        cards.push({
+          config: { wide_screen_mode: true },
+          header: { title: { tag: "plain_text", content: cardTitle } },
+          elements: [
+            {
+              tag: "markdown",
+              content: `**[${item.competitor_name}]** — ${item.summary}\n\n[原文链接](${item.source_url})`,
+            },
+          ],
+        });
+      } else {
+        cards.push(card);
+      }
+
+      remaining = remaining.slice(chunk.length);
+      partNum++;
+    }
   }
   return cards;
 }
@@ -441,13 +473,46 @@ function buildWeeklyLarkCards(
     return [trimmedCard];
   }
 
+  // Byte-bounded split, chunked per competitor
   const cards: LarkCard[] = [];
-  let cardIndex = 0;
-  for (const [org, compItems] of grouped) {
+  const CARD_LIMIT = 28 * 1024;
+
+  for (const [_org, compItems] of grouped) {
     const competitorName = compItems[0]!.competitor_name;
-    const cardTitle = `${competitorName} — ${baseTitle} (${cardIndex + 1}/${grouped.size})`;
-    cards.push(buildCard(compItems, cardTitle));
-    cardIndex++;
+    let remaining = [...compItems];
+    let partNum = 1;
+
+    while (remaining.length > 0) {
+      const cardTitle = `${competitorName} — ${baseTitle} (part ${partNum})`;
+      let chunk = remaining;
+      let card = buildCard(chunk, cardTitle);
+
+      // Halve the chunk until it fits within the byte limit
+      while (chunk.length > 1 && Buffer.byteLength(JSON.stringify(card), "utf-8") > CARD_LIMIT) {
+        chunk = chunk.slice(0, Math.ceil(chunk.length / 2));
+        card = buildCard(chunk, cardTitle);
+      }
+
+      // Single-item fallback: emit a minimal plain-text card when even one item exceeds the limit
+      if (chunk.length === 1 && Buffer.byteLength(JSON.stringify(card), "utf-8") > CARD_LIMIT) {
+        const item = chunk[0]!;
+        cards.push({
+          config: { wide_screen_mode: true },
+          header: { title: { tag: "plain_text", content: cardTitle }, template: "purple" },
+          elements: [
+            {
+              tag: "markdown",
+              content: `**[${item.competitor_name}]** — ${item.summary}\n\n[原文链接](${item.source_url})`,
+            },
+          ],
+        });
+      } else {
+        cards.push(card);
+      }
+
+      remaining = remaining.slice(chunk.length);
+      partNum++;
+    }
   }
   return cards;
 }
