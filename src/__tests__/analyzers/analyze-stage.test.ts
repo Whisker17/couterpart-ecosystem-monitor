@@ -335,6 +335,48 @@ describe("AnalyzeStage.execute", () => {
     expect(result.itemsProcessed).toBe(0);
   });
 
+  test("budget warning logs at most once per run with multiple pending items", async () => {
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+
+    db.exec(`INSERT INTO competitors (name, org) VALUES ('Corp W', 'corp-w')`);
+    const cid = db.query<{ id: number }, []>("SELECT last_insert_rowid() as id").get()!.id;
+    db.exec(`
+      INSERT INTO content_items (competitor_id, source, source_url, content, analysis_status)
+      VALUES
+        (${cid}, 'blog', 'https://corp-w.com/post-1', 'content1', 'pending'),
+        (${cid}, 'blog', 'https://corp-w.com/post-2', 'content2', 'pending'),
+        (${cid}, 'blog', 'https://corp-w.com/post-3', 'content3', 'pending')
+    `);
+
+    // Seed prior spend at 80% of cap (warning threshold) — 40 * 0.8 = 32
+    const monthlyCap = 40;
+    db.exec(`
+      INSERT INTO analyses
+        (content_item_id, summary, significance, input_tokens, output_tokens,
+         model_id, estimated_cost_usd, analyzed_at)
+      VALUES
+        (1, 'prior', 'routine', 1000, 500, 'claude-sonnet-4-6', ${monthlyCap * 0.85}, datetime('now'))
+    `);
+
+    const warnMessages: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(" "));
+      origWarn(...args);
+    };
+
+    try {
+      const stage = new AnalyzeStage(makeGenerateObjectMock());
+      await stage.execute(CTX);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    const budgetWarnings = warnMessages.filter((m) => m.includes("[analyze] budget warning"));
+    expect(budgetWarnings.length).toBe(1);
+  });
+
   test("processes multiple items in a single run", async () => {
     const { getDb } = await import("../../storage/db.js");
     const db = getDb();
