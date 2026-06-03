@@ -73,11 +73,13 @@ export type GenerateObjectFn = (options: {
   system: string;
   prompt: string;
   maxOutputTokens?: number;
+  abortSignal?: AbortSignal;
 }) => Promise<{ object: ContentAnalysis; usage: { inputTokens?: number; outputTokens?: number } }>;
 
 export async function reviewContent(
   input: ReviewInput,
-  generateObjectFn?: GenerateObjectFn
+  generateObjectFn?: GenerateObjectFn,
+  signal?: AbortSignal
 ): Promise<ReviewResult> {
   const effectiveGenerateObject = generateObjectFn ?? generateObject;
   const settings = getSettings();
@@ -106,6 +108,7 @@ export async function reviewContent(
     system: systemPrompt,
     prompt: userPrompt,
     maxOutputTokens: settings.llm.maxTokensPerCall,
+    abortSignal: signal,
   });
 
   const inputTokens = usage?.inputTokens ?? 0;

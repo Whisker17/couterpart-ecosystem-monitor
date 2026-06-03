@@ -1,8 +1,30 @@
+import { APICallError, TypeValidationError } from "ai";
 import type { PipelineStage, PipelineContext, StageResult } from "../runner.js";
 import { getDb } from "../../storage/db.js";
 import { getSettings } from "../../config/settings.js";
 import { reviewContent } from "../../analyzers/llm-reviewer.js";
+import { withRetry } from "../../utils/retry.js";
 import type { ReviewInput, ReviewResult, GenerateObjectFn } from "../../analyzers/llm-reviewer.js";
+
+type SleepFn = (ms: number) => Promise<void>;
+
+export const LLM_TIMEOUT_MS = 60_000;
+
+function isRateLimitError(err: unknown): boolean {
+  return err instanceof APICallError && err.statusCode === 429;
+}
+
+function isServerError(err: unknown): boolean {
+  return err instanceof APICallError && err.statusCode === 500;
+}
+
+function isSchemaValidationError(err: unknown): boolean {
+  return err instanceof TypeValidationError;
+}
+
+function isRetryableApiError(err: unknown): boolean {
+  return isRateLimitError(err) || isServerError(err);
+}
 
 interface PendingItem {
   id: number;
@@ -25,7 +47,9 @@ export class AnalyzeStage implements PipelineStage {
   readonly name = "analyze";
 
   constructor(
-    private readonly reviewFn: GenerateObjectFn | undefined = undefined
+    private readonly reviewFn: GenerateObjectFn | undefined = undefined,
+    private readonly sleepFn: SleepFn = (ms) => Bun.sleep(ms),
+    private readonly timeoutMs: number = LLM_TIMEOUT_MS
   ) {}
 
   async execute(_ctx: PipelineContext): Promise<StageResult> {
@@ -127,10 +151,55 @@ export class AnalyzeStage implements PipelineStage {
       let result: ReviewResult | null = null;
       let analysisError: string | null = null;
 
+      // Timeout — mark failed and leave pending for next run if exceeded
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+
       try {
-        result = await reviewContent(input, this.reviewFn);
+        // Outer retry: schema validation failures (retry 1×)
+        result = await withRetry(
+          async () => {
+            // Inner retry: 429 rate-limit and 500 server errors with exponential backoff
+            return withRetry(
+              () => reviewContent(input, this.reviewFn, controller.signal),
+              {
+                maxAttempts: 3,
+                initialDelayMs: 2000,
+                backoffFactor: 2,
+                retryIf: isRetryableApiError,
+                onRetry: (err, attempt) => {
+                  const status = err instanceof APICallError ? err.statusCode : "?";
+                  console.warn(`[analyze] item=${item.id} LLM error (HTTP ${status}), retry ${attempt}/2`);
+                },
+                sleepFn: this.sleepFn,
+              }
+            );
+          },
+          {
+            maxAttempts: 2,
+            initialDelayMs: 500,
+            retryIf: isSchemaValidationError,
+            onRetry: (_err, attempt) => {
+              console.warn(`[analyze] item=${item.id} schema validation failed, retry ${attempt}/1`);
+            },
+            sleepFn: this.sleepFn,
+          }
+        );
       } catch (err) {
-        analysisError = err instanceof Error ? err.message : String(err);
+        if (controller.signal.aborted) {
+          analysisError = `LLM timeout (>${this.timeoutMs / 1000}s)`;
+        } else if (isRateLimitError(err)) {
+          analysisError = `LLM rate limit (429) — retries exhausted`;
+        } else if (isServerError(err)) {
+          analysisError = `LLM server error (500) — retries exhausted`;
+        } else if (isSchemaValidationError(err)) {
+          analysisError = `Schema validation failed after retry`;
+        } else {
+          analysisError = err instanceof Error ? err.message : String(err);
+        }
+        console.error(`[analyze] item=${item.id} failed: ${analysisError}`);
+      } finally {
+        clearTimeout(timer);
       }
 
       if (result) {
