@@ -224,7 +224,7 @@ function buildLarkCards(
   const singleCard = buildCard(items, baseTitle);
   const singleCardJson = JSON.stringify(singleCard);
 
-  if (singleCardJson.length <= 20 * 1024) {
+  if (Buffer.byteLength(singleCardJson, "utf-8") <= 20 * 1024) {
     return [singleCard];
   }
 
@@ -240,7 +240,7 @@ function buildLarkCards(
   }
 
   const trimmedJson = JSON.stringify(trimmedCard);
-  if (trimmedJson.length <= 30 * 1024) {
+  if (Buffer.byteLength(trimmedJson, "utf-8") <= 28 * 1024) {
     return [trimmedCard];
   }
 
@@ -422,7 +422,7 @@ function buildWeeklyLarkCards(
   const singleCard = buildCard(items, baseTitle);
   const singleJson = JSON.stringify(singleCard);
 
-  if (singleJson.length <= 20 * 1024) {
+  if (Buffer.byteLength(singleJson, "utf-8") <= 20 * 1024) {
     return [singleCard];
   }
 
@@ -436,7 +436,8 @@ function buildWeeklyLarkCards(
     });
   }
 
-  if (JSON.stringify(trimmedCard).length <= 30 * 1024) {
+  const trimmedCardJson = JSON.stringify(trimmedCard);
+  if (Buffer.byteLength(trimmedCardJson, "utf-8") <= 28 * 1024) {
     return [trimmedCard];
   }
 
