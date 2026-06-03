@@ -944,4 +944,69 @@ describe("Lark card Level-3 byte-bounded chunking", () => {
       expect(Buffer.byteLength(JSON.stringify(card), "utf-8")).toBeLessThanOrEqual(28 * 1024);
     }
   });
+
+  test("daily: summary of JSON-escaped chars (quotes) — fallback card must still be ≤ 28KB and contain the truncated summary", async () => {
+    // '"' serializes as '\"' in JSON, doubling the byte cost — raw budget calc underestimates
+    const hugeSummary = '"'.repeat(30000);
+    await seedCompletedItem({
+      org: "corp-a", name: "Corp A", significance: "notable",
+      sourceUrl: "https://corp-a.com/q1", summary: hugeSummary,
+    });
+
+    const stage = new ReportStage();
+    await stage.execute(makeCTX());
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'daily'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ config: unknown; header: unknown; elements: Array<{ content?: string }> }>;
+    };
+
+    expect(report.cards.length).toBeGreaterThanOrEqual(1);
+    for (const card of report.cards) {
+      expect(Buffer.byteLength(JSON.stringify(card), "utf-8")).toBeLessThanOrEqual(28 * 1024);
+    }
+    // The fallback card's markdown element should start with '"' (truncation happened, not empty fallback)
+    const lastCard = report.cards[report.cards.length - 1]!;
+    const mdEl = (lastCard as { elements: Array<{ content?: string }> }).elements.find(
+      (e) => typeof e.content === "string" && e.content.includes('"')
+    );
+    expect(mdEl).toBeDefined();
+  });
+
+  test("weekly: summary of JSON-escaped chars (newlines) — fallback card must still be ≤ 28KB and contain the truncated summary", async () => {
+    // '\n' serializes as '\n' (2 chars) in JSON — raw byte count equals serialized but
+    // the total card JSON is still larger than a naive overhead calculation predicts.
+    const hugeSummary = '\n'.repeat(30000);
+    await seedCompletedItem({
+      org: "corp-a", name: "Corp A", significance: "notable",
+      sourceUrl: "https://corp-a.com/n2", summary: hugeSummary,
+    });
+
+    const stage = new ReportStage(noopGenerateObject as never);
+    await stage.execute(makeCTX({ mode: "weekly" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '${REPORT_DATE}' AND report_type = 'weekly'`
+    ).get()!;
+    const report = JSON.parse(row.content) as {
+      cards: Array<{ config: unknown; header: { template?: string }; elements: Array<{ content?: string }> }>;
+    };
+
+    expect(report.cards.length).toBeGreaterThanOrEqual(1);
+    for (const card of report.cards) {
+      expect(Buffer.byteLength(JSON.stringify(card), "utf-8")).toBeLessThanOrEqual(28 * 1024);
+    }
+    // The fallback card should contain a newline in its markdown content (truncation happened, not empty)
+    const lastCard = report.cards[report.cards.length - 1]!;
+    const mdEl = (lastCard as { elements: Array<{ content?: string }> }).elements.find(
+      (e) => typeof e.content === "string" && e.content.includes("\n")
+    );
+    expect(mdEl).toBeDefined();
+  });
 });

@@ -142,19 +142,28 @@ function buildCollapsiblePanel(item: UnreportedRow): LarkCollapsiblePanel {
   };
 }
 
-function truncateSummaryToFit(summary: string, budgetBytes: number): string {
-  if (Buffer.byteLength(summary, "utf-8") <= budgetBytes) return summary;
-  let byteCount = 0;
-  let i = 0;
-  while (i < summary.length) {
-    const cp = summary.codePointAt(i)!;
-    const charLen = cp > 0xffff ? 2 : 1;
-    const charBytes = Buffer.byteLength(summary.slice(i, i + charLen), "utf-8");
-    if (byteCount + charBytes > budgetBytes) break;
-    byteCount += charBytes;
-    i += charLen;
+function truncateSummaryForFallback(
+  buildFallback: (summary: string) => LarkCard,
+  rawSummary: string,
+  limitBytes: number
+): string {
+  if (Buffer.byteLength(JSON.stringify(buildFallback(rawSummary)), "utf-8") <= limitBytes) {
+    return rawSummary;
   }
-  return summary.slice(0, i) + "…";
+  const codePoints = [...rawSummary];
+  let lo = 0;
+  let hi = codePoints.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    const candidate = codePoints.slice(0, mid).join("") + "…";
+    if (Buffer.byteLength(JSON.stringify(buildFallback(candidate)), "utf-8") <= limitBytes) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (lo === 0) return "…";
+  return codePoints.slice(0, lo).join("") + "…";
 }
 
 function buildLarkCards(
@@ -292,13 +301,8 @@ function buildLarkCards(
             },
           ],
         });
-        let fallback = buildFallback(item.summary);
-        if (Buffer.byteLength(JSON.stringify(fallback), "utf-8") > CARD_LIMIT) {
-          const overhead = Buffer.byteLength(JSON.stringify(buildFallback("")), "utf-8");
-          const budget = CARD_LIMIT - overhead - 512;
-          fallback = buildFallback(truncateSummaryToFit(item.summary, budget));
-        }
-        cards.push(fallback);
+        const truncatedSummary = truncateSummaryForFallback(buildFallback, item.summary, CARD_LIMIT);
+        cards.push(buildFallback(truncatedSummary));
       } else {
         cards.push(card);
       }
@@ -528,13 +532,8 @@ function buildWeeklyLarkCards(
             },
           ],
         });
-        let fallback = buildFallback(item.summary);
-        if (Buffer.byteLength(JSON.stringify(fallback), "utf-8") > CARD_LIMIT) {
-          const overhead = Buffer.byteLength(JSON.stringify(buildFallback("")), "utf-8");
-          const budget = CARD_LIMIT - overhead - 512;
-          fallback = buildFallback(truncateSummaryToFit(item.summary, budget));
-        }
-        cards.push(fallback);
+        const truncatedSummary = truncateSummaryForFallback(buildFallback, item.summary, CARD_LIMIT);
+        cards.push(buildFallback(truncatedSummary));
       } else {
         cards.push(card);
       }
