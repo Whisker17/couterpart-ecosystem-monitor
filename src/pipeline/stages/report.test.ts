@@ -3,7 +3,14 @@ import { existsSync, unlinkSync, mkdirSync, rmSync } from "fs";
 import { ReportStage } from "./report.js";
 import type { PipelineContext } from "../runner.js";
 import type { WeeklyTheme } from "../../schema/analysis.js";
-import { getYesterdayPeriod } from "../../utils/time-window.js";
+import { getYesterdayPeriod, getWeekPeriod } from "../../utils/time-window.js";
+
+// Mirrors reportDateAsNow() in report.ts: noon UTC on a YYYY-MM-DD date string.
+// Safe for all practical timezones (UTC-11 to UTC+12).
+function noonUTC(dateStr: string): Date {
+  const [y, m, d] = dateStr.split("-");
+  return new Date(Date.UTC(parseInt(y!), parseInt(m!) - 1, parseInt(d!), 12, 0, 0));
+}
 
 const TEST_DB_PATH = "data/test-report-tz.db";
 const REPORT_DATE = "2026-06-02";
@@ -77,7 +84,8 @@ async function seedItemWithAnalyzedAt(opts: {
 // ---------------------------------------------------------------------------
 describe("ReportStage daily: analyzed_at time-window filtering (UTC+8)", () => {
   test("includes item with analyzed_at inside yesterday's UTC+8 window", async () => {
-    const { startUnix, endUnix } = getYesterdayPeriod(TZ);
+    // Use noonUTC(REPORT_DATE) to match what the stage does with reportDateAsNow(ctx.reportDate)
+    const { startUnix, endUnix } = getYesterdayPeriod(TZ, noonUTC(REPORT_DATE));
     const midWindow = Math.floor((startUnix + endUnix) / 2);
 
     await seedItemWithAnalyzedAt({
@@ -94,8 +102,8 @@ describe("ReportStage daily: analyzed_at time-window filtering (UTC+8)", () => {
   });
 
   test("excludes item with analyzed_at before yesterday's UTC+8 window", async () => {
-    const { startUnix } = getYesterdayPeriod(TZ);
-    const beforeWindow = startUnix - 3600; // 1 hour before window start
+    const { startUnix } = getYesterdayPeriod(TZ, noonUTC(REPORT_DATE));
+    const beforeWindow = startUnix - 3600;
 
     await seedItemWithAnalyzedAt({
       org: "corp-a", name: "Corp A",
@@ -111,8 +119,8 @@ describe("ReportStage daily: analyzed_at time-window filtering (UTC+8)", () => {
   });
 
   test("excludes item with analyzed_at after yesterday's UTC+8 window (i.e. today)", async () => {
-    const { endUnix } = getYesterdayPeriod(TZ);
-    const afterWindow = endUnix + 3600; // 1 hour after window end (today)
+    const { endUnix } = getYesterdayPeriod(TZ, noonUTC(REPORT_DATE));
+    const afterWindow = endUnix + 3600;
 
     await seedItemWithAnalyzedAt({
       org: "corp-a", name: "Corp A",
@@ -128,7 +136,7 @@ describe("ReportStage daily: analyzed_at time-window filtering (UTC+8)", () => {
   });
 
   test("includes only items within the window when mixed timestamps present", async () => {
-    const { startUnix, endUnix } = getYesterdayPeriod(TZ);
+    const { startUnix, endUnix } = getYesterdayPeriod(TZ, noonUTC(REPORT_DATE));
     const midWindow = Math.floor((startUnix + endUnix) / 2);
 
     await seedItemWithAnalyzedAt({
@@ -139,12 +147,12 @@ describe("ReportStage daily: analyzed_at time-window filtering (UTC+8)", () => {
     await seedItemWithAnalyzedAt({
       org: "corp-b", name: "Corp B",
       sourceUrl: "https://corp-b.com/out-old",
-      analyzedAtUnix: startUnix - 86400, // 2 days ago
+      analyzedAtUnix: startUnix - 86400, // 2 days before window
     });
     await seedItemWithAnalyzedAt({
       org: "corp-c", name: "Corp C",
       sourceUrl: "https://corp-c.com/out-new",
-      analyzedAtUnix: endUnix + 3600, // today
+      analyzedAtUnix: endUnix + 3600, // after window end
     });
 
     const stage = new ReportStage();
@@ -196,5 +204,124 @@ describe("ReportStage weekly: generates report and deliveries with no items in w
     await stage.execute(makeCTX({ mode: "weekly" }));
 
     expect(existsSync(`data/reports/weekly-${REPORT_DATE}.json`)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("ReportStage daily: window derived from ctx.reportDate (not ambient clock)", () => {
+  test("uses ctx.reportDate to compute the time window, ignoring ambient clock", async () => {
+    // Use a fixed past date so the window is deterministic regardless of when
+    // this test runs.
+    const PAST = "2026-06-01";
+    const tz = "UTC";
+    const { startUnix, endUnix } = getYesterdayPeriod(tz, noonUTC(PAST));
+
+    // Seed one item inside the PAST window (May 31 in UTC)
+    await seedItemWithAnalyzedAt({
+      org: "corp-a", name: "Corp A",
+      sourceUrl: "https://corp-a.com/in-past",
+      analyzedAtUnix: startUnix + 3600,
+    });
+
+    // Seed one item in a clearly different window (two days later: June 2)
+    const { startUnix: futureStart } = getYesterdayPeriod(tz, noonUTC("2026-06-03"));
+    await seedItemWithAnalyzedAt({
+      org: "corp-b", name: "Corp B",
+      sourceUrl: "https://corp-b.com/in-future",
+      analyzedAtUnix: futureStart + 3600,
+    });
+
+    const stage = new ReportStage();
+    const result = await stage.execute(makeCTX({ reportDate: PAST, timezone: tz }));
+
+    // Only the item inside May 31 (the day before June 1) should be included
+    expect(result.itemsProcessed).toBe(1);
+  });
+
+  test("items outside the ctx.reportDate window are excluded even if analyzed recently", async () => {
+    const PAST = "2026-06-01";
+    const tz = "UTC";
+
+    // Seed an item analyzed in the June 2 window (two days after the PAST window)
+    const { startUnix } = getYesterdayPeriod(tz, noonUTC("2026-06-03"));
+    await seedItemWithAnalyzedAt({
+      org: "corp-a", name: "Corp A",
+      sourceUrl: "https://corp-a.com/recent",
+      analyzedAtUnix: startUnix + 3600,
+    });
+
+    const stage = new ReportStage();
+    const result = await stage.execute(makeCTX({ reportDate: PAST, timezone: tz }));
+
+    expect(result.itemsProcessed).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("ReportStage daily: BETWEEN boundary conditions (startUnix / endUnix)", () => {
+  test("item at exactly startUnix is included", async () => {
+    const { startUnix } = getYesterdayPeriod(TZ, noonUTC(REPORT_DATE));
+    await seedItemWithAnalyzedAt({
+      org: "corp-a", name: "Corp A",
+      sourceUrl: "https://corp-a.com/at-start",
+      analyzedAtUnix: startUnix,
+    });
+    const stage = new ReportStage();
+    const result = await stage.execute(makeCTX());
+    expect(result.itemsProcessed).toBe(1);
+  });
+
+  test("item at exactly endUnix is included", async () => {
+    const { endUnix } = getYesterdayPeriod(TZ, noonUTC(REPORT_DATE));
+    await seedItemWithAnalyzedAt({
+      org: "corp-a", name: "Corp A",
+      sourceUrl: "https://corp-a.com/at-end",
+      analyzedAtUnix: endUnix,
+    });
+    const stage = new ReportStage();
+    const result = await stage.execute(makeCTX());
+    expect(result.itemsProcessed).toBe(1);
+  });
+
+  test("item at startUnix-1 is excluded", async () => {
+    const { startUnix } = getYesterdayPeriod(TZ, noonUTC(REPORT_DATE));
+    await seedItemWithAnalyzedAt({
+      org: "corp-a", name: "Corp A",
+      sourceUrl: "https://corp-a.com/before-start",
+      analyzedAtUnix: startUnix - 1,
+    });
+    const stage = new ReportStage();
+    const result = await stage.execute(makeCTX());
+    expect(result.itemsProcessed).toBe(0);
+  });
+
+  test("item at endUnix+1 is excluded", async () => {
+    const { endUnix } = getYesterdayPeriod(TZ, noonUTC(REPORT_DATE));
+    await seedItemWithAnalyzedAt({
+      org: "corp-a", name: "Corp A",
+      sourceUrl: "https://corp-a.com/after-end",
+      analyzedAtUnix: endUnix + 1,
+    });
+    const stage = new ReportStage();
+    const result = await stage.execute(makeCTX());
+    expect(result.itemsProcessed).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("formatDate: west-of-UTC timezone returns the correct calendar date", () => {
+  test("reportDate 2026-06-02 with America/New_York timezone shows 2026-06-02 in card title", async () => {
+    const stage = new ReportStage();
+    await stage.execute(makeCTX({ reportDate: "2026-06-02", timezone: "America/New_York" }));
+
+    const { getDb } = await import("../../storage/db.js");
+    const db = getDb();
+    const row = db.query<{ content: string }, []>(
+      `SELECT content FROM reports WHERE report_date = '2026-06-02' AND report_type = 'daily'`
+    ).get()!;
+    const report = JSON.parse(row.content) as { cards: Array<{ header: { title: { content: string } } }> };
+    const title = report.cards[0]!.header.title.content;
+    expect(title).toContain("2026-06-02");
+    expect(title).not.toContain("2026-06-01");
   });
 });

@@ -40,14 +40,27 @@ const SIGNIFICANCE_ORDER: Record<string, number> = {
   routine: 2,
 };
 
+// Convert a YYYY-MM-DD report date string to a Date that represents noon UTC
+// on that calendar date. Noon UTC maps to the correct calendar date in all
+// practical timezones (UTC-11 to UTC+12), unlike midnight UTC which shifts to
+// the previous day in west-of-UTC zones.
+function reportDateAsNow(dateStr: string): Date {
+  const [yearStr, monthStr, dayStr] = dateStr.split("-");
+  return new Date(Date.UTC(
+    parseInt(yearStr!, 10),
+    parseInt(monthStr!, 10) - 1,
+    parseInt(dayStr!, 10),
+    12, 0, 0,
+  ));
+}
+
 function formatDate(dateStr: string, timezone: string): string {
-  const d = new Date(dateStr + "T00:00:00Z");
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: timezone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).format(d);
+  }).format(reportDateAsNow(dateStr));
 }
 
 function formatShortDate(dateStr: string, timezone: string): string {
@@ -482,7 +495,7 @@ export class ReportStage implements PipelineStage {
     const db = getDb();
     const errors: string[] = [];
 
-    const { startUnix: weekStartUnix, endUnix: weekEndUnix } = getWeekPeriod(ctx.timezone);
+    const { startUnix: weekStartUnix, endUnix: weekEndUnix } = getWeekPeriod(ctx.timezone, reportDateAsNow(ctx.reportDate));
     const rows = db.query<WeeklyRow, [number, number]>(`
       SELECT
         ci.id            AS item_id,
@@ -621,8 +634,9 @@ export class ReportStage implements PipelineStage {
     }
     const isPartial = partialCompetitors.length > 0;
 
-    // Query items analyzed within yesterday's time window in the configured timezone
-    const { startUnix, endUnix } = getYesterdayPeriod(ctx.timezone);
+    // Query items analyzed within yesterday's time window, derived from ctx.reportDate
+    // not from ambient new Date() — ensures --date overrides are respected.
+    const { startUnix, endUnix } = getYesterdayPeriod(ctx.timezone, reportDateAsNow(ctx.reportDate));
     const rows = db.query<UnreportedRow, [number, number]>(`
       SELECT
         ci.id            AS item_id,
