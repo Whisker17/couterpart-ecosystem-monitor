@@ -114,7 +114,8 @@ export class DispatchStage implements PipelineStage {
 
       for (const delivery of deliveries) {
         try {
-          const resp = await this._sendCard(webhookUrl, delivery.card_content);
+          const envelope = JSON.stringify({ msg_type: "interactive", card: JSON.parse(delivery.card_content) });
+          const resp = await this._sendCard(webhookUrl, envelope);
           const messageId = resp.data?.message_id ?? null;
           db.query(
             `UPDATE report_deliveries SET delivery_status='sent', message_id=?, sent_at=datetime('now') WHERE id=?`

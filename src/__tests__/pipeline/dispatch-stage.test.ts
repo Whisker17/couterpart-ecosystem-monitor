@@ -49,7 +49,7 @@ async function seedDelivery(reportId: number, opts: {
 } = {}) {
   const { getDb } = await import("../../storage/db.js");
   const db = getDb();
-  const content = opts.cardContent ?? JSON.stringify({ msg_type: "interactive", card: {} });
+  const content = opts.cardContent ?? JSON.stringify({ config: { wide_screen_mode: true }, header: { title: { tag: "plain_text", content: "Test Card" } }, elements: [] });
   const status = opts.status ?? "pending";
   const cardIndex = opts.cardIndex ?? 0;
 
@@ -182,19 +182,21 @@ describe("DispatchStage: success path", () => {
     expect(capturedUrl).toBe("https://open.feishu.cn/hook/specific-url");
   });
 
-  test("passes card_content to sendCard", async () => {
+  test("wraps bare card_content in Lark envelope before sending", async () => {
     const reportId = await seedReport();
-    const cardJson = JSON.stringify({ config: {}, header: { title: { tag: "plain_text", content: "test" } }, elements: [] });
-    await seedDelivery(reportId, { cardContent: cardJson });
+    const bareCard = { config: { wide_screen_mode: true }, header: { title: { tag: "plain_text", content: "Daily Report" } }, elements: [] };
+    await seedDelivery(reportId, { cardContent: JSON.stringify(bareCard) });
 
-    let capturedCard = "";
+    let capturedBody = "";
     const stage = new DispatchStage(async (_url, card) => {
-      capturedCard = card;
+      capturedBody = card;
       return structuredClone(successResponse);
     });
     await stage.execute(CTX);
 
-    expect(capturedCard).toBe(cardJson);
+    const parsed = JSON.parse(capturedBody) as { msg_type: string; card: unknown };
+    expect(parsed.msg_type).toBe("interactive");
+    expect(parsed.card).toEqual(bareCard);
   });
 });
 
