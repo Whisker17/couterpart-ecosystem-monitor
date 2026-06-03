@@ -42,3 +42,19 @@ export const ContentAnalysisSchema = z.object({
 });
 
 export type ContentAnalysis = z.infer<typeof ContentAnalysisSchema>;
+
+export const WeeklyThemeSchema = z.object({
+  themes: z
+    .array(
+      z.object({
+        title: z.string().describe("主题标题，简洁概括该跨竞品趋势。"),
+        description: z.string().describe("对该主题的简短分析，2-3句话，说明趋势背后的含义。"),
+        competitors: z.array(z.string()).describe("涉及该主题的竞品名称列表。"),
+      })
+    )
+    .min(2)
+    .max(3)
+    .describe("从本周竞品动态中提取2-3个最重要的跨竞品主题趋势。"),
+});
+
+export type WeeklyTheme = z.infer<typeof WeeklyThemeSchema>;
