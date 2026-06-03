@@ -60,7 +60,7 @@ ${competitorContext}
 
 interface CapturedPrompts {
   system: string;
-  user: string;
+  prompt: string;
 }
 
 function makeCapturer(): { mock: GenerateObjectFn; captured: CapturedPrompts[] } {
