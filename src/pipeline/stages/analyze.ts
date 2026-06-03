@@ -1,4 +1,4 @@
-import { APICallError, TypeValidationError } from "ai";
+import { APICallError, TypeValidationError, NoObjectGeneratedError } from "ai";
 import type { PipelineStage, PipelineContext, StageResult } from "../runner.js";
 import { getDb } from "../../storage/db.js";
 import { getSettings } from "../../config/settings.js";
@@ -19,7 +19,8 @@ function isServerError(err: unknown): boolean {
 }
 
 function isSchemaValidationError(err: unknown): boolean {
-  return err instanceof TypeValidationError;
+  // generateObject() wraps TypeValidationError in NoObjectGeneratedError as err.cause
+  return NoObjectGeneratedError.isInstance(err) && TypeValidationError.isInstance((err as NoObjectGeneratedError).cause);
 }
 
 function isRetryableApiError(err: unknown): boolean {
@@ -192,7 +193,7 @@ export class AnalyzeStage implements PipelineStage {
           analysisError = `LLM rate limit (429) — retries exhausted`;
         } else if (isServerError(err)) {
           analysisError = `LLM server error (500) — retries exhausted`;
-        } else if (isSchemaValidationError(err)) {
+        } else if (isSchemaValidationError(err) || TypeValidationError.isInstance(err)) {
           analysisError = `Schema validation failed after retry`;
         } else {
           analysisError = err instanceof Error ? err.message : String(err);

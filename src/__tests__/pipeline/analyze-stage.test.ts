@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { existsSync, unlinkSync, mkdirSync } from "fs";
-import { APICallError, TypeValidationError } from "ai";
+import { APICallError, TypeValidationError, NoObjectGeneratedError } from "ai";
 import { AnalyzeStage } from "../../pipeline/stages/analyze.js";
 import type { PipelineContext } from "../../pipeline/runner.js";
 
@@ -44,7 +44,19 @@ function makeApiError(statusCode: number) {
 }
 
 function makeSchemaError() {
-  return new TypeValidationError({ message: "validation failed", value: {}, cause: undefined });
+  const cause = new TypeValidationError({ value: {}, cause: new Error("bad schema") });
+  return new NoObjectGeneratedError({
+    response: { id: "test", timestamp: new Date(), modelId: "test-model" },
+    usage: {
+      inputTokens: 0,
+      inputTokenDetails: { noCacheTokens: undefined, cacheReadTokens: undefined, cacheWriteTokens: undefined },
+      outputTokens: 0,
+      outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
+      totalTokens: 0,
+    },
+    finishReason: "stop",
+    cause,
+  });
 }
 
 async function seedPendingItem(opts: { retryCount?: number } = {}) {
