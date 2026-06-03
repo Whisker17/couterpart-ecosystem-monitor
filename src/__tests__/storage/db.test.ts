@@ -148,3 +148,41 @@ test("DDL is idempotent — second getDb() call does not re-run DDL", async () =
   // If DDL re-ran it would fail (tables already exist without IF NOT EXISTS... but we use IF NOT EXISTS so should be fine)
   expect(() => getDb()).not.toThrow();
 });
+
+test("schema migration: existing DB with user_version=0 gets migrated without data loss", async () => {
+  // Simulate an old DB with user_version=0 and some existing data
+  // Create a partial DB manually (only competitors table, no other tables)
+  const { Database } = await import("bun:sqlite");
+  const oldDb = new Database(TEST_DB_PATH, { create: true });
+  oldDb.exec("CREATE TABLE IF NOT EXISTS competitors (id INTEGER PRIMARY KEY, name TEXT NOT NULL, org TEXT NOT NULL)");
+  oldDb.exec("INSERT INTO competitors (name, org) VALUES ('OldCorp', 'old-corp')");
+  // user_version stays 0 (default)
+  oldDb.close();
+
+  // getDb() should detect user_version=0 and apply the full DDL migration
+  const { getDb } = await import("../../storage/db.js");
+  const db = getDb();
+
+  // Existing row must still be there (no data loss)
+  const comp = db.query<{ name: string }, []>(
+    "SELECT name FROM competitors WHERE org = 'old-corp'"
+  ).get();
+  expect(comp?.name).toBe("OldCorp");
+
+  // All required tables must now exist
+  const tables = db
+    .query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    )
+    .all()
+    .map((r) => r.name);
+  expect(tables).toContain("content_items");
+  expect(tables).toContain("analyses");
+  expect(tables).toContain("analysis_inputs");
+  expect(tables).toContain("reports");
+  expect(tables).toContain("report_deliveries");
+
+  // user_version must be bumped to 1
+  const { user_version } = db.query<{ user_version: number }, []>("PRAGMA user_version").get()!;
+  expect(user_version).toBe(1);
+});
