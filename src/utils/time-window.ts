@@ -61,7 +61,8 @@ export function getYesterdayPeriod(
   const yDay = yesterday.getUTCDate();
 
   const startMs = localMidnightToUTC(timezone, yYear, yMonth, yDay);
-  const endMs = startMs + 24 * 3600 * 1000 - 1000; // + 23:59:59
+  // End = today's local midnight − 1 s; handles DST days (23 h or 25 h)
+  const endMs = localMidnightToUTC(timezone, year, month, day) - 1000;
 
   return {
     startUnix: Math.floor(startMs / 1000),
@@ -87,7 +88,8 @@ export function getWeekPeriod(
   const wsDay = weekStart.getUTCDate();
 
   const startMs = localMidnightToUTC(timezone, wsYear, wsMonth, wsDay);
-  const endMs = localMidnightToUTC(timezone, yYear, yMonth, yDay) + 24 * 3600 * 1000 - 1000;
+  // End = today's local midnight − 1 s; handles DST days (23 h or 25 h)
+  const endMs = localMidnightToUTC(timezone, year, month, day) - 1000;
 
   return {
     startUnix: Math.floor(startMs / 1000),
