@@ -1,6 +1,6 @@
 import type { PipelineStage, PipelineContext, StageResult, CompetitorStatus } from "../runner.js";
 import { getCompetitors as defaultGetCompetitors } from "../../config/competitors.js";
-import { collectFromRss as defaultCollectFromRss } from "../../collectors/blog-rss.js";
+import { collectFromRss as defaultCollectFromRss, FeedUnavailableError } from "../../collectors/blog-rss.js";
 import { getDb } from "../../storage/db.js";
 import type { CompetitorConfig } from "../../config/competitors.js";
 import type { CollectedItem } from "../../collectors/blog-rss.js";
@@ -102,6 +102,9 @@ export class CollectStage implements PipelineStage {
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        if (err instanceof FeedUnavailableError) {
+          console.warn(`[collect] Feed unavailable for ${competitor.org} (${err.statusCode}) — skipping`);
+        }
         errors.push(`${competitor.org}: ${message}`);
         competitorStatuses.push({
           competitorId: competitor.org,
