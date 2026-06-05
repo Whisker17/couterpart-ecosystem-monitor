@@ -20,5 +20,11 @@
   },
   "collector": {
     "contentMinLength": 500
+  },
+  "retention": {
+    "contentItemsDays": 60,
+    "analysesDays": 60,
+    "analysisInputsDays": 30,
+    "reportsDays": 90
   }
 }
