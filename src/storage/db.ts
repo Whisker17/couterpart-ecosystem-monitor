@@ -42,6 +42,7 @@ function migrateV1toV2(db: Database): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_analyses_content_item_id ON analyses(content_item_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_analyses_analyzed_at ON analyses(analyzed_at)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_analysis_inputs_analysis_id ON analysis_inputs(analysis_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_analysis_inputs_content_item_id ON analysis_inputs(content_item_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_analysis_inputs_created_at ON analysis_inputs(created_at)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_reports_created_at ON reports(created_at)`);
 }

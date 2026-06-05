@@ -214,6 +214,7 @@ test("migrateV1toV2: retention indexes created on fresh init", async () => {
   expect(indexes).toContain("idx_analyses_content_item_id");
   expect(indexes).toContain("idx_analyses_analyzed_at");
   expect(indexes).toContain("idx_analysis_inputs_analysis_id");
+  expect(indexes).toContain("idx_analysis_inputs_content_item_id");
   expect(indexes).toContain("idx_analysis_inputs_created_at");
   expect(indexes).toContain("idx_reports_created_at");
 });

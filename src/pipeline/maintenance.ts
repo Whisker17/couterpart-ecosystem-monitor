@@ -80,6 +80,9 @@ export function cleanupContentItems(db: Database, retentionDays: number): void {
        AND collected_at < datetime('now', '-${retentionDays} days')
        AND NOT EXISTS (
          SELECT 1 FROM analyses WHERE analyses.content_item_id = content_items.id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM analysis_inputs WHERE analysis_inputs.content_item_id = content_items.id
        )`
   );
   console.log(`[Cleanup] cleanupContentItems: deleted ${result.changes} rows.`);

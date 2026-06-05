@@ -376,6 +376,19 @@ describe("cleanupContentItems", () => {
     expect(rows.length).toBe(1);
     db.close();
   });
+
+  test("skips complete items with orphan analysis_inputs (analysis_id NULL — failed attempt)", () => {
+    const db = makeMemoryDb();
+    // Complete item older than cutoff, no analyses row, but a failed-attempt audit row
+    const ciId = insertContentItem(db, "2025-01-01 00:00:00", "complete");
+    insertAnalysisInput(db, ciId, null, "2025-01-01 00:00:00");
+
+    expect(() => cleanupContentItems(db, 60)).not.toThrow();
+
+    const rows = db.query<{ id: number }, []>("SELECT id FROM content_items").all();
+    expect(rows.length).toBe(1);
+    db.close();
+  });
 });
 
 describe("runDailyCleanup", () => {
