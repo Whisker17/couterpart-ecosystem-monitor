@@ -5,7 +5,7 @@ import { DDL } from "./schema.js";
 
 // SQLITE_FCNTL_PERSIST_WAL op code (SQLite spec value 10)
 const SQLITE_FCNTL_PERSIST_WAL = 10;
-const CURRENT_VERSION = 1;
+const CURRENT_VERSION = 2;
 
 let instance: Database | null = null;
 
@@ -35,6 +35,16 @@ function migrateV0toV1(db: Database): void {
       db.exec(col.sql);
     }
   }
+}
+
+function migrateV1toV2(db: Database): void {
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_content_items_status_collected_at ON content_items(analysis_status, collected_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_analyses_content_item_id ON analyses(content_item_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_analyses_analyzed_at ON analyses(analyzed_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_analysis_inputs_analysis_id ON analysis_inputs(analysis_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_analysis_inputs_content_item_id ON analysis_inputs(content_item_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_analysis_inputs_created_at ON analysis_inputs(created_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_reports_created_at ON reports(created_at)`);
 }
 
 // WAL mode change requires an exclusive lock; bun:sqlite's busy_timeout does
@@ -96,7 +106,12 @@ function initDb(): Database {
 
   if (user_version < CURRENT_VERSION) {
     db.exec(DDL);
-    migrateV0toV1(db);
+    if (user_version < 1) {
+      migrateV0toV1(db);
+    }
+    if (user_version < 2) {
+      migrateV1toV2(db);
+    }
     db.exec(`PRAGMA user_version = ${CURRENT_VERSION}`);
   }
 

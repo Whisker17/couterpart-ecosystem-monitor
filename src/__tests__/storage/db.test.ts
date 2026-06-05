@@ -52,11 +52,11 @@ test("synchronous is NORMAL (1)", async () => {
   expect(row.synchronous).toBe(1);
 });
 
-test("user_version is 1 after init", async () => {
+test("user_version is 2 after init", async () => {
   const { getDb } = await import("../../storage/db.js");
   const db = getDb();
   const row = db.query<{ user_version: number }, []>("PRAGMA user_version").get()!;
-  expect(row.user_version).toBe(1);
+  expect(row.user_version).toBe(2);
 });
 
 test("all 6 tables exist", async () => {
@@ -196,7 +196,25 @@ test("schema migration: existing DB with user_version=0 gets migrated without da
   expect(cols).toContain("last_synced_at");
   expect(cols).toContain("created_at");
 
-  // user_version must be bumped to 1
+  // user_version must be bumped to 2 (current version)
   const { user_version } = db.query<{ user_version: number }, []>("PRAGMA user_version").get()!;
-  expect(user_version).toBe(1);
+  expect(user_version).toBe(2);
+});
+
+test("migrateV1toV2: retention indexes created on fresh init", async () => {
+  const { getDb } = await import("../../storage/db.js");
+  const db = getDb();
+  const indexes = db
+    .query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type='index' ORDER BY name"
+    )
+    .all()
+    .map((r) => r.name);
+  expect(indexes).toContain("idx_content_items_status_collected_at");
+  expect(indexes).toContain("idx_analyses_content_item_id");
+  expect(indexes).toContain("idx_analyses_analyzed_at");
+  expect(indexes).toContain("idx_analysis_inputs_analysis_id");
+  expect(indexes).toContain("idx_analysis_inputs_content_item_id");
+  expect(indexes).toContain("idx_analysis_inputs_created_at");
+  expect(indexes).toContain("idx_reports_created_at");
 });

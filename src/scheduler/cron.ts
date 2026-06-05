@@ -2,7 +2,7 @@ import { Cron } from "croner";
 import { runPipeline, type PipelineStage, type PipelineContext } from "../pipeline/runner.js";
 import { getSettings } from "../config/settings.js";
 import { getDb } from "../storage/db.js";
-import { cleanupOldContent, archiveReports, vacuumDb } from "../pipeline/maintenance.js";
+import { runDailyCleanup, archiveReports, vacuumDb } from "../pipeline/maintenance.js";
 
 export interface Scheduler {
   start(): Scheduler;
@@ -46,7 +46,7 @@ export function createScheduler(
           async () => {
             console.log("[scheduler] daily pipeline triggered");
             await runPipeline(stages, { mode: "daily", timezone });
-            cleanupOldContent(getDb());
+            runDailyCleanup(getDb(), settings.retention);
           }
         )
       );
@@ -58,7 +58,7 @@ export function createScheduler(
           async () => {
             console.log("[scheduler] weekly pipeline triggered");
             await runPipeline(stages, { mode: "weekly", timezone });
-            cleanupOldContent(getDb());
+            runDailyCleanup(getDb(), settings.retention);
           }
         )
       );
@@ -70,7 +70,7 @@ export function createScheduler(
           async () => {
             console.log("[scheduler] monthly maintenance triggered");
             const db = getDb();
-            await archiveReports(db);
+            await archiveReports(db, settings.retention.reportsDays);
             vacuumDb(db);
           }
         )
